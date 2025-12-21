@@ -1,5 +1,6 @@
 import { Project } from '../types';
 import { DB_PROVIDER, FIREBASE_CONFIG, validateConnectivity } from './config';
+import { APIAdapter } from './apiAdapter';
 
 // --- INTERFACE ---
 export interface IProjectRepository {
@@ -222,6 +223,8 @@ class FirebaseProjectAdapter implements IProjectRepository {
 let repository: IProjectRepository;
 if (DB_PROVIDER === 'firebase') {
   repository = new FirebaseProjectAdapter();
+} else if (DB_PROVIDER === 'postgresql') {
+  repository = new APIAdapter();
 } else {
   repository = new IndexedDBAdapter();
 }

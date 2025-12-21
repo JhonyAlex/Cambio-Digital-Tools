@@ -18,13 +18,15 @@
 // ------------------------------------------------------------------------------
 // 1. SELECCIÓN DE BASE DE DATOS
 // ------------------------------------------------------------------------------
-// IMPORTANTE: Se ha establecido en 'local' para evitar errores de conexión
-// hasta que se configuren las credenciales reales de Firebase.
+// Opciones disponibles:
+// - 'local': IndexedDB del navegador
+// - 'firebase': Firebase Cloud Firestore
+// - 'postgresql': PostgreSQL en servidor remoto (IONOS)
 //
 // PARA ACTIVAR MODO CLOUD (PRODUCCIÓN):
-// 1. Cambia esto a 'firebase'.
-// 2. Rellena el objeto FIREBASE_CONFIG abajo con tus datos reales.
-export const DB_PROVIDER: 'local' | 'firebase' = 'local'; 
+// 1. Cambia esto a 'firebase' o 'postgresql'.
+// 2. Rellena el objeto correspondiente abajo con tus datos reales.
+export const DB_PROVIDER: 'local' | 'firebase' | 'postgresql' = 'postgresql'; 
 
 // ------------------------------------------------------------------------------
 // 2. CONFIGURACIÓN GOOGLE CLOUD (FIREBASE)
@@ -42,15 +44,15 @@ export const FIREBASE_CONFIG = {
 // ------------------------------------------------------------------------------
 // 3. CONFIGURACIÓN POSTGRESQL (IONOS)
 // ------------------------------------------------------------------------------
-// NOTA: El navegador NO puede conectarse directamente por TCP a Postgres.
-// Estos datos se usan para generar scripts de migración/backup SQL.
+// IMPORTANTE: Esta configuración se usa para conectar al servidor PostgreSQL remoto.
+// Los datos de conexión se cargan desde las variables de entorno (.env).
 export const POSTGRES_CONFIG = {
-  host: "74.208.125.117",
-  port: 5432,
-  database: "herramientascd",
-  user: "jhony",
-  password: process.env.DB_PASSWORD || "vcDDw5QiFT7G", // Fallback for demo environment
-  connectionString: "postgresql://jhony:vcDDw5QiFT7G@74.208.125.117:5432/herramientascd"
+  host: import.meta.env.VITE_DB_HOST || "74.208.125.117",
+  port: parseInt(import.meta.env.VITE_DB_PORT || "5432"),
+  database: import.meta.env.VITE_DB_NAME || "herramientascd",
+  user: import.meta.env.VITE_DB_USER || "jhony",
+  password: import.meta.env.VITE_DB_PASSWORD || "vcDDw5QiFT7G",
+  connectionString: import.meta.env.VITE_DATABASE_URL || "postgresql://jhony:vcDDw5QiFT7G@74.208.125.117:5432/herramientascd"
 };
 
 // ------------------------------------------------------------------------------
@@ -91,6 +93,16 @@ export const validateConnectivity = async (): Promise<void> => {
     } catch (e) {
         throw new ConnectionError("No se puede contactar con Google Cloud Firestore.");
     }
+  }
+
+  if ((DB_PROVIDER as string) === 'postgresql') {
+    // Verificación de que las credenciales están configuradas
+    if (!POSTGRES_CONFIG.connectionString || POSTGRES_CONFIG.connectionString.includes('your_')) {
+      console.error("CRITICAL: PostgreSQL está habilitado pero las credenciales no están configuradas.");
+      throw new ConnectionError("Error de Configuración: Credenciales de PostgreSQL no configuradas. Verifica tu archivo .env");
+    }
+    // La validación real de conexión se hace en databaseService.ts
+    return;
   }
 
   // Si es local, siempre "funciona" (mientras haya navegador)

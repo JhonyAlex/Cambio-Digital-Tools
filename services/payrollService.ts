@@ -1,3 +1,4 @@
+
 import { Employee, PayrollConfig, PaymentRecord, EmployeeRole, RoleDefinition } from '../types';
 import { DB_PROVIDER, FIREBASE_CONFIG, validateConnectivity } from './config';
 
@@ -12,6 +13,7 @@ export interface IPayrollRepository {
   
   getHistory(): Promise<PaymentRecord[]>;
   savePayment(record: PaymentRecord): Promise<void>;
+  deletePayment(id: string): Promise<void>; // New Method
 }
 
 // --- SCHEMA MIGRATION HELPERS (DATA SAFETY LAYER) ---
@@ -19,7 +21,8 @@ export interface IPayrollRepository {
 const getDefaultConfig = (): PayrollConfig => ({
   baseSalary: 1423500,
   totalBudget: 50000000,
-  euroExchangeRate: 4200,
+  euroExchangeRate: 4600,
+  usdExchangeRate: 4200, // Added Default USD
   roles: [
       { id: '1', name: 'Auxiliar', multiplier: 1 },
       { id: '2', name: 'Senior', multiplier: 2.5 },
@@ -37,6 +40,7 @@ const migrateConfig = (data: any): PayrollConfig => {
             baseSalary: data.baseSalary ?? base.baseSalary,
             totalBudget: data.totalBudget ?? base.totalBudget,
             euroExchangeRate: data.euroExchangeRate ?? base.euroExchangeRate,
+            usdExchangeRate: data.usdExchangeRate ?? base.usdExchangeRate,
             roles: data.roles
         };
     }
@@ -56,6 +60,7 @@ const migrateConfig = (data: any): PayrollConfig => {
             baseSalary: data.baseSalary ?? base.baseSalary,
             totalBudget: data.totalBudget ?? base.totalBudget,
             euroExchangeRate: data.euroExchangeRate ?? base.euroExchangeRate,
+            usdExchangeRate: base.usdExchangeRate,
             roles: migratedRoles.length > 0 ? migratedRoles : base.roles
         };
     }
@@ -87,7 +92,11 @@ const migratePaymentRecord = (data: any): PaymentRecord => {
         christmasBonus: data.christmasBonus || 0,
         extraBonus: data.extraBonus || 0,
         totalPaid: data.totalPaid || 0,
-        notes: data.notes || ''
+        notes: data.notes || '',
+        sourceWalletId: data.sourceWalletId,
+        fundSources: data.fundSources,
+        breakdown: data.breakdown,
+        linkedExpenseId: data.linkedExpenseId // Persist link
     };
 };
 
@@ -149,8 +158,23 @@ class LocalStorageAdapter implements IPayrollRepository {
   async savePayment(record: PaymentRecord): Promise<void> {
     await validateConnectivity();
     const history = await this.getHistory();
-    history.push(record);
+    const index = history.findIndex(r => r.id === record.id);
+    
+    if (index >= 0) {
+        // Update existing
+        history[index] = record;
+    } else {
+        // Create new
+        history.push(record);
+    }
     localStorage.setItem(this.KEY_HISTORY, JSON.stringify(history));
+  }
+
+  async deletePayment(id: string): Promise<void> {
+      await validateConnectivity();
+      const history = await this.getHistory();
+      const filtered = history.filter(r => r.id !== id);
+      localStorage.setItem(this.KEY_HISTORY, JSON.stringify(filtered));
   }
 }
 
@@ -205,7 +229,6 @@ class FirebaseAdapter implements IPayrollRepository {
   async saveConfig(config: PayrollConfig): Promise<void> {
     const db = await this.getDb();
     const { doc, setDoc } = await this.getFirestoreModules();
-    // Reemplaza el documento completo para asegurar que la estructura de roles sea la correcta
     await setDoc(doc(db, "payroll", "config"), config);
   }
 
@@ -214,7 +237,6 @@ class FirebaseAdapter implements IPayrollRepository {
     const { collection, getDocs } = await this.getFirestoreModules();
     const snapshot = await getDocs(collection(db, "employees"));
     const raw = snapshot.docs.map((d: any) => d.data());
-    // Auto-migrate on read
     return raw.map(migrateEmployee);
   }
 
@@ -240,9 +262,15 @@ class FirebaseAdapter implements IPayrollRepository {
 
   async savePayment(record: PaymentRecord): Promise<void> {
     const db = await this.getDb();
-    const { collection, addDoc } = await this.getFirestoreModules();
-    // History is append-only, using addDoc creates a new unique ID document
-    await addDoc(collection(db, "history"), record);
+    const { doc, setDoc } = await this.getFirestoreModules();
+    // Use ID to support updates (upsert)
+    await setDoc(doc(db, "history", record.id), record, { merge: true });
+  }
+
+  async deletePayment(id: string): Promise<void> {
+      const db = await this.getDb();
+      const { doc, deleteDoc } = await this.getFirestoreModules();
+      await deleteDoc(doc(db, "history", id));
   }
 }
 

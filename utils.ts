@@ -1,3 +1,4 @@
+
 import { AudioFile, TimelineGroup, FileType } from './types';
 
 // Helper to extract date from WhatsApp filenames
@@ -67,20 +68,23 @@ export const groupFilesByDate = (
   return sortedGroups;
 };
 
-// Robust mime-type detection
+// Robust mime-type detection for Gemini API Compatibility
 const getMimeType = (file: File): string => {
-  // Trust the browser if valid
-  if (file.type && file.type !== '') return file.type;
-
   const ext = file.name.split('.').pop()?.toLowerCase();
+  
+  // Explicit mapping for Audio to ensure Gemini compatibility
+  // Browser detection can sometimes be generic (e.g. audio/x-m4a), which APIs might reject causing Error 400
   switch (ext) {
     // Audio
     case 'opus': return 'audio/ogg'; 
     case 'ogg': return 'audio/ogg';
-    case 'mp3': return 'audio/mp3';
+    case 'mp3': return 'audio/mpeg'; // Important: Use mpeg, not mp3
     case 'wav': return 'audio/wav';
-    case 'm4a': return 'audio/mp4';
+    case 'm4a': return 'audio/mp4'; // Important: Use mp4 for m4a container
     case 'aac': return 'audio/aac';
+    case 'flac': return 'audio/flac';
+    case 'wma': return 'audio/wma';
+    case 'amr': return 'audio/amr';
     // Images
     case 'jpg':
     case 'jpeg': return 'image/jpeg';
@@ -93,8 +97,12 @@ const getMimeType = (file: File): string => {
     case 'md': return 'text/plain';
     case 'csv': return 'text/csv';
     case 'json': return 'application/json';
-    default: return 'application/octet-stream'; 
   }
+
+  // Fallback to browser detection if extension not in list
+  if (file.type && file.type !== '') return file.type;
+
+  return 'application/octet-stream'; 
 };
 
 export const detectFileType = (file: File): FileType => {
@@ -114,7 +122,7 @@ export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { 
     const timeout = setTimeout(() => {
         reader.abort();
         reject(new Error("Timeout reading file."));
-    }, 20000); // 20s timeout (increased for larger files like PDFs)
+    }, 30000); // 30s timeout (increased for larger files)
 
     reader.onloadend = () => {
       clearTimeout(timeout);
@@ -124,10 +132,13 @@ export const fileToGenerativePart = async (file: File): Promise<{ inlineData: { 
           return;
       }
       
+      // Extract pure Base64 (remove data:image/png;base64, prefix)
       const base64Content = base64String.split(',')[1];
+      
       resolve({
         inlineData: {
           data: base64Content,
+          // Use our strict mime type detector instead of file.type to avoid API errors
           mimeType: getMimeType(file),
         },
       });
@@ -149,4 +160,79 @@ export const readFileAsText = async (file: File): Promise<string> => {
         reader.onerror = (e) => reject(e);
         reader.readAsText(file);
     });
+};
+
+// --- AUDIO CONVERSION UTILITIES ---
+
+function writeString(view: DataView, offset: number, string: string) {
+  for (let i = 0; i < string.length; i++) {
+    view.setUint8(offset + i, string.charCodeAt(i));
+  }
+}
+
+/**
+ * Converts any browser-supported audio file (OGG, Opus, WebM) to WAV (PCM 16-bit).
+ * This solves compatibility issues with Gemini API for WhatsApp audios.
+ */
+export const convertAudioToWav = async (file: File): Promise<File> => {
+  // Use standard AudioContext (available in modern browsers)
+  const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+  if (!AudioContext) throw new Error("Web Audio API not supported in this browser");
+  
+  const audioContext = new AudioContext();
+  const arrayBuffer = await file.arrayBuffer();
+  
+  // Native decoding (Browser handles OGG/Opus decoding internally)
+  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+  
+  // Encode to WAV (16-bit PCM)
+  const numOfChan = audioBuffer.numberOfChannels;
+  const length = audioBuffer.length * numOfChan * 2 + 44;
+  const buffer = new ArrayBuffer(length);
+  const view = new DataView(buffer);
+  
+  let pos = 0;
+  
+  // RIFF chunk descriptor
+  writeString(view, pos, 'RIFF'); pos += 4;
+  view.setUint32(pos, length - 8, true); pos += 4;
+  writeString(view, pos, 'WAVE'); pos += 4;
+  
+  // fmt sub-chunk
+  writeString(view, pos, 'fmt '); pos += 4;
+  view.setUint32(pos, 16, true); pos += 4; // Subchunk1Size (16 for PCM)
+  view.setUint16(pos, 1, true); pos += 2; // AudioFormat (1 for PCM)
+  view.setUint16(pos, numOfChan, true); pos += 2;
+  view.setUint32(pos, audioBuffer.sampleRate, true); pos += 4;
+  view.setUint32(pos, audioBuffer.sampleRate * 2 * numOfChan, true); pos += 4; // ByteRate
+  view.setUint16(pos, numOfChan * 2, true); pos += 2; // BlockAlign
+  view.setUint16(pos, 16, true); pos += 2; // BitsPerSample
+  
+  // data sub-chunk
+  writeString(view, pos, 'data'); pos += 4;
+  view.setUint32(pos, length - pos - 4, true); pos += 4;
+  
+  // Interleave and Write PCM data
+  const channels = [];
+  for (let i = 0; i < numOfChan; i++) {
+      channels.push(audioBuffer.getChannelData(i));
+  }
+  
+  let offset = 44;
+  for (let i = 0; i < audioBuffer.length; i++) {
+      for (let ch = 0; ch < numOfChan; ch++) {
+          let sample = channels[ch][i];
+          // Clip to [-1, 1]
+          sample = Math.max(-1, Math.min(1, sample));
+          // Scale to 16-bit integer
+          sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+          view.setInt16(offset, sample, true);
+          offset += 2;
+      }
+  }
+  
+  const wavBlob = new Blob([buffer], { type: 'audio/wav' });
+  const newName = file.name.replace(/\.[^/.]+$/, "") + ".wav";
+  
+  return new File([wavBlob], newName, { type: 'audio/wav' });
 };

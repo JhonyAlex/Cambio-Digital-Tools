@@ -1,6 +1,7 @@
+
 import { Project } from '../types';
 import { DB_PROVIDER, FIREBASE_CONFIG, validateConnectivity } from './config';
-import { APIAdapter } from './apiAdapter';
+import { localBlobService } from './localBlobService';
 
 // --- INTERFACE ---
 export interface IProjectRepository {
@@ -8,11 +9,21 @@ export interface IProjectRepository {
   saveProject(project: Project): Promise<void>;
   deleteProject(id: string): Promise<void>;
   createNewProject(name: string): Promise<Project>;
+  duplicateProject(projectId: string): Promise<Project>;
 }
 
 const DB_NAME = 'ChronosDB';
 const DB_VERSION = 3; 
 const STORE_NAME = 'projects';
+
+// Helper to safely restore Date objects from Strings/Timestamps
+const hydrateDate = (d: any): Date => {
+  if (!d) return new Date();
+  if (d instanceof Date) return d;
+  if (typeof d === 'string' || typeof d === 'number') return new Date(d);
+  if (d.toDate && typeof d.toDate === 'function') return d.toDate(); // Firestore Timestamp
+  return new Date();
+};
 
 /**
  * --- SCHEMA MIGRATION STRATEGY ---
@@ -26,7 +37,11 @@ const migrateProjectStructure = (data: any): Project => {
     name: data.name || 'Sin Nombre',
     createdAt: data.createdAt || Date.now(),
     updatedAt: data.updatedAt || Date.now(),
-    files: Array.isArray(data.files) ? data.files : [],
+    // Fix: Hydrate dates in files array to ensure they are Date objects
+    files: Array.isArray(data.files) ? data.files.map((f: any) => ({
+      ...f,
+      date: hydrateDate(f.date)
+    })) : [],
     chatHistory: Array.isArray(data.chatHistory) ? data.chatHistory : [],
     // Defaults for newer versions:
     tags: Array.isArray(data.tags) ? data.tags : [],
@@ -46,6 +61,8 @@ const sanitizeProjectForSave = (project: Project): Project => {
   return {
     ...project,
     // Ensure files don't contain non-serializable File objects
+    // STRICT RULE: Files are binary blobs, stripped here to prevent DB upload.
+    // They are stored in IndexedDB (localBlobService) and hydrated by UI.
     files: project.files.map(f => {
       const { file, ...rest } = f; 
       return rest;
@@ -61,9 +78,12 @@ class IndexedDBAdapter implements IProjectRepository {
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onerror = () => reject("Error opening database");
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = (event) => {
+          const db = (event.target as IDBOpenDBRequest).result;
+          resolve(db);
+      };
       request.onupgradeneeded = (event) => {
-        const db = request.result;
+        const db = (event.target as IDBOpenDBRequest).result;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
           db.createObjectStore(STORE_NAME, { keyPath: 'id' });
         }
@@ -75,6 +95,8 @@ class IndexedDBAdapter implements IProjectRepository {
     await validateConnectivity();
     try {
       const db = await this.openDB();
+      if (!db) return [];
+      
       return new Promise((resolve, reject) => {
         const transaction = db.transaction([STORE_NAME], 'readonly');
         const store = transaction.objectStore(STORE_NAME);
@@ -96,6 +118,8 @@ class IndexedDBAdapter implements IProjectRepository {
   async saveProject(project: Project): Promise<void> {
     await validateConnectivity();
     const db = await this.openDB();
+    if (!db) throw new Error("DB not available");
+
     const cleanProject = sanitizeProjectForSave(project);
     return new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_NAME], 'readwrite');
@@ -108,7 +132,19 @@ class IndexedDBAdapter implements IProjectRepository {
 
   async deleteProject(id: string): Promise<void> {
     await validateConnectivity();
+    
+    // 1. Get project to identify files to cleanup
+    const projects = await this.getProjects();
+    const target = projects.find(p => p.id === id);
+    if (target) {
+        for (const file of target.files) {
+            await localBlobService.deleteFile(file.id).catch(() => {});
+        }
+    }
+
     const db = await this.openDB();
+    if (!db) throw new Error("DB not available");
+
     return new Promise((resolve, reject) => {
       const transaction = db.transaction([STORE_NAME], 'readwrite');
       const store = transaction.objectStore(STORE_NAME);
@@ -134,6 +170,40 @@ class IndexedDBAdapter implements IProjectRepository {
     };
     await this.saveProject(newProject);
     return newProject;
+  }
+
+  async duplicateProject(projectId: string): Promise<Project> {
+      await validateConnectivity();
+      const projects = await this.getProjects();
+      const original = projects.find(p => p.id === projectId);
+      if (!original) throw new Error("Project not found");
+
+      const newId = crypto.randomUUID();
+      const newFiles = [];
+
+      // Duplicate files (Deep Copy logic)
+      for (const file of original.files) {
+          const newFileId = crypto.randomUUID();
+          // Attempt to copy underlying blob
+          await localBlobService.copyFile(file.id, newFileId).catch(e => console.warn("Blob copy failed", e));
+          
+          newFiles.push({
+              ...file,
+              id: newFileId
+          });
+      }
+
+      const duplicatedProject: Project = {
+          ...original,
+          id: newId,
+          name: `${original.name} (Copia)`,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          files: newFiles
+      };
+
+      await this.saveProject(duplicatedProject);
+      return duplicatedProject;
   }
 }
 
@@ -189,6 +259,8 @@ class FirebaseProjectAdapter implements IProjectRepository {
   async saveProject(project: Project): Promise<void> {
     const db = await this.getDb();
     const { doc, setDoc } = await this.getFirestoreModules();
+    
+    // IMPORTANT: Here we strip the binary files. Only metadata and analysis are saved.
     const cleanProject = sanitizeProjectForSave(project);
     
     // setDoc con merge: true para seguridad extra, aunque aquí reemplazamos el documento completo del proyecto
@@ -198,7 +270,22 @@ class FirebaseProjectAdapter implements IProjectRepository {
 
   async deleteProject(id: string): Promise<void> {
     const db = await this.getDb();
-    const { doc, deleteDoc } = await this.getFirestoreModules();
+    const { doc, deleteDoc, getDoc } = await this.getFirestoreModules();
+    
+    // Cleanup local files first
+    try {
+        const docRef = doc(db, "projects", id);
+        const snap = await getDoc(docRef);
+        if (snap.exists()) {
+            const data = snap.data() as Project;
+            if (data.files) {
+                for (const file of data.files) {
+                    await localBlobService.deleteFile(file.id).catch(() => {});
+                }
+            }
+        }
+    } catch (e) { console.warn("Failed to cleanup local blobs", e); }
+
     await deleteDoc(doc(db, "projects", id));
   }
 
@@ -218,13 +305,42 @@ class FirebaseProjectAdapter implements IProjectRepository {
     await this.saveProject(newProject);
     return newProject;
   }
+
+  async duplicateProject(projectId: string): Promise<Project> {
+      const db = await this.getDb();
+      const { doc, getDoc } = await this.getFirestoreModules();
+      
+      const docRef = doc(db, "projects", projectId);
+      const snap = await getDoc(docRef);
+      if (!snap.exists()) throw new Error("Project not found");
+      
+      const original = snap.data() as Project;
+      const newId = crypto.randomUUID();
+      const newFiles = [];
+
+      for (const file of original.files) {
+          const newFileId = crypto.randomUUID();
+          await localBlobService.copyFile(file.id, newFileId).catch(e => console.warn("Blob copy failed", e));
+          newFiles.push({ ...file, id: newFileId });
+      }
+
+      const duplicatedProject: Project = {
+          ...original,
+          id: newId,
+          name: `${original.name} (Copia)`,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          files: newFiles
+      };
+
+      await this.saveProject(duplicatedProject);
+      return duplicatedProject;
+  }
 }
 
 let repository: IProjectRepository;
 if (DB_PROVIDER === 'firebase') {
   repository = new FirebaseProjectAdapter();
-} else if (DB_PROVIDER === 'postgresql') {
-  repository = new APIAdapter();
 } else {
   repository = new IndexedDBAdapter();
 }
@@ -233,3 +349,4 @@ export const getProjects = () => repository.getProjects();
 export const saveProject = (p: Project) => repository.saveProject(p);
 export const deleteProject = (id: string) => repository.deleteProject(id);
 export const createNewProject = (name: string) => repository.createNewProject(name);
+export const duplicateProject = (id: string) => repository.duplicateProject(id);

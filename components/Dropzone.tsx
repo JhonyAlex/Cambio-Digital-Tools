@@ -1,3 +1,4 @@
+
 import React, { useCallback } from 'react';
 import { extractDateFromFilename, extractSequenceFromFilename, detectFileType } from '../utils';
 import { AudioFile } from '../types';
@@ -41,7 +42,7 @@ const Dropzone: React.FC<DropzoneProps> = ({ onFilesAdded, t }) => {
               type.startsWith('text/') ||
               type.includes('pdf') ||
               type.includes('json') ||
-              f.name.endsWith('.opus') || f.name.endsWith('.m4a');
+              f.name.endsWith('.opus') || f.name.endsWith('.m4a') || f.name.endsWith('.ogg');
     });
 
     const processedFiles: AudioFile[] = validFiles.map(f => ({
@@ -58,7 +59,7 @@ const Dropzone: React.FC<DropzoneProps> = ({ onFilesAdded, t }) => {
   };
 
   const textDrag = t ? t.dragDrop : "Arrastra tus archivos aquí";
-  const subText = "Soporta Audio, Imágenes (OCR), PDF y Texto";
+  const subText = "Soporta Audios WhatsApp (.ogg/.opus), MP3, Imágenes y PDF";
 
   return (
     <div 

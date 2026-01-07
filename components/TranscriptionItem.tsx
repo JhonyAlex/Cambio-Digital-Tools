@@ -1,6 +1,8 @@
+
 import React, { useState, useEffect } from 'react';
 import { AudioFile, FileType } from '../types';
-import { useAppContext } from '../App';
+import { useAppContext } from '../hooks/useAppContext';
+import { localBlobService } from '../services/localBlobService';
 
 interface Props {
   item: AudioFile;
@@ -9,16 +11,43 @@ interface Props {
 const TranscriptionItem: React.FC<Props> = ({ item }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [hasCopied, setHasCopied] = useState(false);
   const { t } = useAppContext();
 
-  // Create Object URL for images to show preview
+  // HYDRATE FILE FROM INDEXEDDB (BLOB STORE) IF MISSING IN MEMORY
   useEffect(() => {
-    if (item.fileType === 'image' && item.file) {
-        const url = URL.createObjectURL(item.file);
-        setPreviewUrl(url);
-        return () => URL.revokeObjectURL(url);
-    }
-  }, [item.file, item.fileType]);
+    let activeUrl: string | null = null;
+
+    const loadLocalFile = async () => {
+        // If we already have the file in memory (just uploaded), use it
+        if (item.file) {
+            const url = URL.createObjectURL(item.file);
+            setPreviewUrl(url);
+            activeUrl = url;
+            return;
+        }
+
+        // Otherwise, try to fetch from IndexedDB
+        if (item.status === 'completed' || item.fileType === 'image' || item.fileType === 'audio') {
+            try {
+                const blob = await localBlobService.getFile(item.id);
+                if (blob) {
+                    const url = URL.createObjectURL(blob);
+                    setPreviewUrl(url);
+                    activeUrl = url;
+                }
+            } catch (e) {
+                console.warn("Could not load local file blob for preview", e);
+            }
+        }
+    };
+
+    loadLocalFile();
+
+    return () => {
+        if (activeUrl) URL.revokeObjectURL(activeUrl);
+    };
+  }, [item.id, item.file, item.status, item.fileType]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -61,9 +90,18 @@ const TranscriptionItem: React.FC<Props> = ({ item }) => {
           default: // Audio
               return (
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5 text-blue-300">
-                    <path fillRule="evenodd" d="M19.902 4.098a3.75 3.75 0 00-5.304 0l-4.5 4.5a3.75 3.75 0 001.035 6.037.75.75 0 01-.646 1.353 5.25 5.25 0 01-1.449-8.45l4.5-4.5a5.25 5.25 0 117.424 7.424l-1.757 1.757a.75.75 0 11-1.06-1.06l1.757-1.757a3.75 3.75 0 000-5.304zm-7.389 4.267a.75.75 0 011-.353 5.25 5.25 0 011.449 8.45l-4.5 4.5a5.25 5.25 0 11-7.424-7.424l1.757-1.757a.75.75 0 111.06 1.06l-1.757 1.757a3.75 3.75 0 105.304 5.304l4.5-4.5a3.75 3.75 0 00-1.035-6.037.75.75 0 01-.354-1z" clipRule="evenodd" />
+                    <path fillRule="evenodd" d="M19.902 4.098a3.75 3.75 0 00-5.304 0l-4.5 4.5a3.75 3.75 0 001.035 6.037.75.75 0 01-.646 1.353 5.25 5.25 0 01-1.449-8.45l4.5-4.5a5.25 5.25 0 117.424 7.424l-1.757 1.757a.75.75 0 11-1.06-1.06l1.757-1.757a3.75 3.75 0 000-5.304zm-7.389 4.267a.75.75 0 011-.353 5.25 5.25 0 011.449 8.45l-4.5 4.5a5.25 5.25 0 11-7.424-7.424l1.757-1.757a.75.75 0 111.06 1.06l-1.757-1.757a3.75 3.75 0 105.304 5.304l4.5-4.5a3.75 3.75 0 00-1.035-6.037.75.75 0 01-.354-1z" clipRule="evenodd" />
                 </svg>
               );
+      }
+  };
+
+  const handleCopy = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (item.transcript) {
+          navigator.clipboard.writeText(item.transcript);
+          setHasCopied(true);
+          setTimeout(() => setHasCopied(false), 2000);
       }
   };
 
@@ -73,7 +111,7 @@ const TranscriptionItem: React.FC<Props> = ({ item }) => {
         
         {/* Icon / Thumbnail */}
         <div className="shrink-0 mt-1 bg-slate-700 p-2 rounded-lg relative group overflow-hidden">
-             {previewUrl ? (
+             {item.fileType === 'image' && previewUrl ? (
                  <img src={previewUrl} alt="preview" className="w-10 h-10 object-cover rounded" />
              ) : renderIcon(item.fileType)}
         </div>
@@ -96,6 +134,13 @@ const TranscriptionItem: React.FC<Props> = ({ item }) => {
                <p className="text-sm text-red-400 break-words">{item.errorMsg}</p>
              )}
              
+             {/* AUDIO PLAYER (Local Hydration) */}
+             {item.fileType === 'audio' && previewUrl && (
+                 <div className="mt-2 mb-2">
+                     <audio controls src={previewUrl} className="w-full h-8" />
+                 </div>
+             )}
+             
              {/* Action Link */}
              {item.transcript && (
                <button 
@@ -110,13 +155,32 @@ const TranscriptionItem: React.FC<Props> = ({ item }) => {
 
       {/* Expanded Content */}
       {isExpanded && item.transcript && (
-        <div className="mt-4 pt-4 border-t border-slate-700 animate-in fade-in slide-in-from-top-2">
-          <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-              {item.fileType === 'image' ? 'OCR & Description' : t.fullTranscript}
-          </h5>
+        <div 
+            className="mt-4 pt-4 border-t border-slate-700 animate-in fade-in slide-in-from-top-2 cursor-text select-text"
+            onMouseDown={(e) => e.stopPropagation()} // CRITICAL: Stop drag from parent
+        >
+          <div className="flex justify-between items-center mb-2">
+              <h5 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  {item.fileType === 'image' ? 'OCR & Description' : t.fullTranscript}
+              </h5>
+              <button 
+                  onClick={handleCopy}
+                  className={`text-xs px-2 py-1 rounded transition-colors ${hasCopied ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400 hover:text-white'}`}
+              >
+                  {hasCopied ? "¡Copiado!" : "Copiar Texto"}
+              </button>
+          </div>
+          
           <p className="text-sm text-slate-200 leading-relaxed whitespace-pre-wrap break-words font-mono bg-slate-900/50 p-3 rounded">
             {item.transcript}
           </p>
+          
+          {/* Full Image Preview on Expansion */}
+          {item.fileType === 'image' && previewUrl && (
+              <div className="mt-4">
+                  <img src={previewUrl} alt="Full analysis" className="rounded-lg max-h-96 object-contain bg-slate-900" />
+              </div>
+          )}
         </div>
       )}
     </div>

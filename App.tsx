@@ -1,20 +1,37 @@
-import React, { useState, useEffect } from 'react';
-import { createHashRouter, RouterProvider, Outlet, Navigate, useOutletContext } from 'react-router-dom';
+
+import React, { useState, useEffect, Suspense } from 'react';
+import { createHashRouter, RouterProvider, Outlet, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
-import SettingsModal from './components/SettingsModal';
-import ChronosTool from './components/tools/ChronosTool';
-import PayrollTool from './components/tools/PayrollTool';
-import RevenueTool from './components/tools/RevenueTool';
 import LandingPage from './components/LandingPage';
+import Login from './components/Login';
 import { ApiConfig } from './types';
 import { translations } from './translations';
 import { getEffectiveApiKey, validateConnectivity, DB_PROVIDER } from './services/config';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { authService } from './services/authService';
+
+// --- LAZY LOAD TOOLS ---
+const ChronosTool = React.lazy(() => import('./components/tools/ChronosTool'));
+const PayrollTool = React.lazy(() => import('./components/tools/PayrollTool'));
+const RevenueTool = React.lazy(() => import('./components/tools/RevenueTool'));
+const WalletTool = React.lazy(() => import('./components/tools/WalletTool'));
+const BudgetTool = React.lazy(() => import('./components/tools/BudgetTool'));
+const TextPolisherTool = React.lazy(() => import('./components/tools/TextPolisherTool'));
+const MeetingAnalystTool = React.lazy(() => import('./components/tools/MeetingAnalystTool'));
+
+// --- LAZY LOAD MODALS (New for Stability) ---
+const SettingsModal = React.lazy(() => import('./components/SettingsModal'));
+const AdminPanel = React.lazy(() => import('./components/AdminPanel'));
+const UserProfileModal = React.lazy(() => import('./components/UserProfileModal'));
 
 const DEFAULT_CONFIG: ApiConfig = {
   provider: 'gemini',
   apiKey: '', 
-  model: 'gemini-2.5-flash'
+  models: {
+      fast: 'gemini-flash-latest',
+      complex: 'gemini-3-pro-preview'
+  }
 };
 
 // --- GLOBAL CONNECTION BLOCKER COMPONENT ---
@@ -28,7 +45,6 @@ const ConnectionBlocker: React.FC = () => {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Initial check (optional deeper check could go here)
     if (DB_PROVIDER === 'firebase') {
         validateConnectivity().catch(() => setIsOnline(false));
     }
@@ -67,120 +83,199 @@ const ConnectionBlocker: React.FC = () => {
   );
 };
 
+// --- FIREBASE PERMISSION ERROR SCREEN ---
+const FirestoreRulesErrorScreen: React.FC = () => {
+    return (
+        <div className="fixed inset-0 z-[9999] bg-[#020617] flex flex-col items-center justify-center p-6 overflow-y-auto">
+            <div className="max-w-2xl w-full bg-slate-900 border border-slate-700 rounded-2xl p-8 shadow-2xl">
+                <div className="flex items-center gap-4 mb-6">
+                    <div className="w-12 h-12 bg-amber-500/20 text-amber-500 rounded-xl flex items-center justify-center text-2xl">🛡️</div>
+                    <div>
+                        <h2 className="text-2xl font-bold text-white">Acceso Bloqueado por Firebase</h2>
+                        <p className="text-slate-400">Las reglas de seguridad de Firestore impiden leer los datos.</p>
+                    </div>
+                </div>
+
+                <div className="space-y-6">
+                    <p className="text-slate-300 leading-relaxed">
+                        Parece que la base de datos se creó en <strong>"Modo Producción"</strong>, el cual bloquea todas las lecturas y escrituras por defecto. Debes actualizar las reglas para permitir que los usuarios autenticados accedan.
+                    </p>
+
+                    <div className="bg-black/50 p-4 rounded-xl border border-slate-700">
+                        <h4 className="text-white font-bold mb-2 flex justify-between items-center">
+                            <span>Pasos para Solucionar:</span>
+                            <a 
+                                href="https://console.firebase.google.com/u/0/project/cambio-digital-tools/firestore/rules" 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="text-blue-400 text-sm hover:underline"
+                            >
+                                Abrir Consola Firebase ↗
+                            </a>
+                        </h4>
+                        <ol className="text-sm text-slate-400 list-decimal list-inside space-y-2 mb-4">
+                            <li>Ve a la pestaña <strong>"Reglas" (Rules)</strong> en Cloud Firestore.</li>
+                            <li>Borra el código actual y pega el siguiente código permisivo para desarrollo:</li>
+                        </ol>
+                        
+                        <div className="relative group">
+                            <pre className="bg-[#0f172a] text-emerald-400 p-4 rounded-lg text-xs font-mono overflow-x-auto border border-slate-800">
+{`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}`}
+                            </pre>
+                        </div>
+                    </div>
+
+                    <div className="flex justify-end gap-3">
+                        <button 
+                            onClick={() => window.location.reload()}
+                            className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-lg font-bold shadow-lg transition-all"
+                        >
+                            Ya actualicé las reglas, Reintentar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- LOADING SPINNER ---
+const PageLoader = () => (
+    <div className="h-full flex flex-col items-center justify-center text-slate-500">
+        <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p className="text-sm animate-pulse">Cargando módulo...</p>
+    </div>
+);
+
 // --- LAYOUT COMPONENT ---
 const AppLayout: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [apiConfig, setApiConfig] = useState<ApiConfig>(DEFAULT_CONFIG);
+  const { user, loading, authError } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
 
-  // Load settings on mount
   useEffect(() => {
-    // 1. API Config Load
     const savedConfigStr = localStorage.getItem('chronos_api_config');
     let finalConfig = { ...DEFAULT_CONFIG };
-
     let userSavedKey = '';
     if (savedConfigStr) {
       try {
         const parsed = JSON.parse(savedConfigStr);
+        if (parsed.model && !parsed.models) {
+            parsed.models = { fast: 'gemini-flash-latest', complex: parsed.model };
+        }
+        if (parsed.models?.fast === 'gemini-2.5-flash-latest') {
+            parsed.models.fast = 'gemini-flash-latest';
+        }
         finalConfig = { ...finalConfig, ...parsed };
         userSavedKey = parsed.apiKey || '';
-      } catch (e) {
-        // ignore parse error
-      }
+      } catch (e) {}
     }
-
-    // Apply Modular Logic: User Key -> Env Key
-    finalConfig.apiKey = getEffectiveApiKey(userSavedKey);
-    
-    // Save back if it was purely environmental and we want to persist context
+    finalConfig.apiKey = getEffectiveApiKey(finalConfig.provider, userSavedKey);
     setApiConfig(finalConfig);
   }, []);
 
   const handleSaveSettings = (newConfig: ApiConfig) => {
-    setApiConfig(newConfig);
-    localStorage.setItem('chronos_api_config', JSON.stringify(newConfig));
+    const effectiveKey = getEffectiveApiKey(newConfig.provider, newConfig.apiKey);
+    const configToSave = { ...newConfig, apiKey: newConfig.apiKey }; 
+    const configToState = { ...newConfig, apiKey: effectiveKey }; 
+    setApiConfig(configToState);
+    localStorage.setItem('chronos_api_config', JSON.stringify(configToSave));
     setIsSettingsOpen(false);
   };
 
-  const isConfigured = !!(apiConfig.apiKey && apiConfig.apiKey.length >= 10);
-  
-  // Translation helper
+  if (authError === 'permission-denied') return <FirestoreRulesErrorScreen />;
+  if (loading) return <div className="h-screen bg-[#0f172a] flex items-center justify-center text-slate-500">Cargando sistema...</div>;
+  if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
+  if (user.role === 'pending') {
+      return (
+          <div className="h-screen bg-[#0f172a] flex flex-col items-center justify-center p-6 text-center">
+              <div className="w-16 h-16 bg-amber-500/20 text-amber-500 rounded-full flex items-center justify-center mb-6 text-2xl">⏳</div>
+              <h2 className="text-2xl font-bold text-white mb-2">Cuenta Pendiente de Aprobación</h2>
+              <p className="text-slate-400 max-w-md">Tu solicitud ha sido registrada. Un administrador debe autorizar tu acceso.</p>
+              <div className="flex flex-col gap-3 mt-8 w-full max-w-xs">
+                  <button onClick={() => window.location.reload()} className="w-full px-6 py-2.5 bg-slate-800 text-white rounded-lg hover:bg-slate-700 font-medium transition-all shadow-lg border border-slate-700">Comprobar Estado</button>
+                  <button onClick={async () => { await authService.logout(); navigate('/login'); }} className="text-slate-500 hover:text-red-400 text-sm py-2 transition-colors">Cerrar Sesión</button>
+              </div>
+          </div>
+      );
+  }
+
+  const isConfigured = apiConfig.provider === 'gemini' ? !!(apiConfig.apiKey && apiConfig.apiKey.length >= 10) : !!(apiConfig.apiKey && apiConfig.apiKey.length > 0);
   const t = translations;
 
   return (
-    <div className="flex h-screen bg-[#0f172a] text-slate-200 overflow-hidden">
+    <div className="flex h-screen bg-[#0f172a] text-slate-200 overflow-hidden font-sans">
       <ConnectionBlocker />
       <Sidebar 
         onOpenSettings={() => setIsSettingsOpen(true)} 
+        onOpenAdmin={() => setIsAdminPanelOpen(true)}
+        onOpenProfile={() => setIsProfileOpen(true)}
         isConfigured={isConfigured}
         t={t}
       />
       
-      <main className="flex-1 overflow-y-auto custom-scrollbar relative">
-        <Outlet context={{ apiConfig, t }} />
+      <main className="flex-1 flex flex-col overflow-hidden relative bg-[#0f172a]">
+        <Suspense fallback={<PageLoader />}>
+            <Outlet context={{ apiConfig, t }} />
+        </Suspense>
       </main>
 
-      <SettingsModal 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)}
-        config={apiConfig}
-        onSave={handleSaveSettings}
-        t={t}
-      />
+      <Suspense fallback={null}>
+          <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} config={apiConfig} onSave={handleSaveSettings} t={t} />
+          {isAdminPanelOpen && <AdminPanel onClose={() => setIsAdminPanelOpen(false)} />}
+          <UserProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
+      </Suspense>
     </div>
   );
 };
 
-// --- TYPE FOR OUTLET CONTEXT ---
-export interface AppContextType {
-  apiConfig: ApiConfig;
-  t: typeof translations;
-}
-
-export const useAppContext = () => {
-  return useOutletContext<AppContextType>();
+const ProtectedRoute: React.FC<{ children: React.ReactNode, requiredPerm: string }> = ({ children, requiredPerm }) => {
+    const { user } = useAuth();
+    if (!user) return null; 
+    if (user.role === 'admin') return <>{children}</>;
+    // @ts-ignore
+    if (!user.permissions[requiredPerm]) return <div className="h-full flex flex-col items-center justify-center text-center p-10"><div className="text-4xl mb-4">🔒</div><h2 className="text-xl font-bold text-white">Acceso Restringido</h2><p className="text-slate-400">No tienes permisos para acceder a esta herramienta.</p></div>;
+    return <>{children}</>;
 };
 
-// --- ROUTER CONFIGURATION ---
 const router = createHashRouter([
-  {
-    path: "/",
-    element: <LandingPage />,
-  },
+  { path: "/", element: <LandingPage /> },
+  { path: "/login", element: <Login /> },
   {
     path: "/app",
     element: <AppLayout />,
     children: [
-      {
-        path: "",
-        element: <Navigate to="/app/dashboard" replace />,
-      },
-      {
-        path: "dashboard",
-        element: <Dashboard />,
-      },
-      {
-        path: "chronos",
-        element: <ChronosTool />,
-      },
-      {
-        path: "chronos/:projectId",
-        element: <ChronosTool />,
-      },
-      {
-        path: "payroll",
-        element: <PayrollTool />,
-      },
-      {
-        path: "revenue",
-        element: <RevenueTool />,
-      }
+      { path: "", element: <Navigate to="/app/dashboard" replace /> },
+      { path: "dashboard", element: <Dashboard /> },
+      { path: "chronos", element: <ProtectedRoute requiredPerm="canAccessChronos"><ChronosTool /></ProtectedRoute> },
+      { path: "chronos/:projectId", element: <ProtectedRoute requiredPerm="canAccessChronos"><ChronosTool /></ProtectedRoute> },
+      { path: "payroll", element: <ProtectedRoute requiredPerm="canAccessPayroll"><PayrollTool /></ProtectedRoute> },
+      { path: "revenue", element: <ProtectedRoute requiredPerm="canAccessRevenue"><RevenueTool /></ProtectedRoute> },
+      { path: "wallet", element: <ProtectedRoute requiredPerm="canAccessWallet"><WalletTool /></ProtectedRoute> },
+      { path: "budgets", element: <ProtectedRoute requiredPerm="canAccessBudgets"><BudgetTool /></ProtectedRoute> },
+      { path: "polisher", element: <ProtectedRoute requiredPerm="canAccessPolisher"><TextPolisherTool /></ProtectedRoute> },
+      { path: "meetings", element: <ProtectedRoute requiredPerm="canAccessMeetings"><MeetingAnalystTool /></ProtectedRoute> }
     ]
   }
 ]);
 
 const App: React.FC = () => {
-  return <RouterProvider router={router} />;
+  return (
+      <AuthProvider>
+          <RouterProvider router={router} />
+      </AuthProvider>
+  );
 };
 
 export default App;

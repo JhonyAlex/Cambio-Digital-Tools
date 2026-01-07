@@ -1,734 +1,466 @@
-import React, { useState, useEffect } from 'react';
-import { payrollService } from '../../services/payrollService';
-import { PayrollConfig, Employee, PaymentRecord, PayslipData, RoleDefinition } from '../../types';
 
-const PIN_CODE = "021293";
+import React, { useState, useEffect, useMemo } from 'react';
+import { payrollService } from '../../services/payrollService';
+import { walletService } from '../../services/walletService';
+import { revenueService } from '../../services/revenueService';
+import { PayrollConfig, Employee, PaymentRecord, PayslipData, WalletAccount, PaymentSource, PaymentBreakdown, ExpenseRecord } from '../../types';
+import FinancialConfigModal from './FinancialConfigModal';
 
 const PayrollTool: React.FC = () => {
-  // --- AUTH STATE ---
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [pinInput, setPinInput] = useState("");
-  const [authError, setAuthError] = useState(false);
-
-  // --- DATA STATE ---
   const [config, setConfig] = useState<PayrollConfig | null>(null);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [history, setHistory] = useState<PaymentRecord[]>([]);
-  const [view, setView] = useState<'dashboard' | 'employees' | 'history'>('dashboard');
+  const [wallets, setWallets] = useState<WalletAccount[]>([]);
+  const [view, setView] = useState<'dashboard' | 'employees' | 'payments' | 'history'>('dashboard');
   
-  // --- MODAL STATES ---
+  const [historyYear, setHistoryYear] = useState(new Date().getFullYear());
+  const [historyMonth, setHistoryMonth] = useState(new Date().getMonth());
+  const [historyEmployeeFilter, setHistoryEmployeeFilter] = useState<string>('all');
+
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
+  
+  const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
+  const [activePaymentEmployee, setActivePaymentEmployee] = useState<Employee | null>(null);
+  const [editingPaymentId, setEditingPaymentId] = useState<string | null>(null); 
+  const [paymentBreakdown, setPaymentBreakdown] = useState<PaymentBreakdown>({ baseSalary: 0, christmasBonus: 0, extraBonus: 0 });
+  const [paymentSources, setPaymentSources] = useState<PaymentSource[]>([]);
+  const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
+  const [paymentNotes, setPaymentNotes] = useState('');
+
   const [showPayslipModal, setShowPayslipModal] = useState(false);
   const [currentPayslip, setCurrentPayslip] = useState<PayslipData | null>(null);
-
-  // --- FORM STATES ---
+  const [confirmDeleteModal, setConfirmDeleteModal] = useState<{ isOpen: boolean; record: PaymentRecord | null; refundMoney: boolean; }>({ isOpen: false, record: null, refundMoney: false });
+  const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [employeeForm, setEmployeeForm] = useState<Partial<Employee>>({});
-  const [payslipForm, setPayslipForm] = useState({ message: '', tasks: '', goals: '' });
 
-  // -- CONFIG EDIT STATE --
-  const [tempConfig, setTempConfig] = useState<PayrollConfig | null>(null);
-
-  // INITIAL LOAD
+  useEffect(() => { loadData(); }, []);
+  useEffect(() => { if (feedback) { const timer = setTimeout(() => setFeedback(null), 3000); return () => clearTimeout(timer); } }, [feedback]);
   useEffect(() => {
-    if (isAuthenticated) {
-      loadData();
-    }
-  }, [isAuthenticated]);
+      if (isPaymentModalOpen) {
+          const totalToPay = (paymentBreakdown.baseSalary || 0) + (paymentBreakdown.christmasBonus || 0) + (paymentBreakdown.extraBonus || 0);
+          setPaymentSources(prevSources => {
+              if (prevSources.length === 1 && prevSources[0].amount !== totalToPay) {
+                  return [{ ...prevSources[0], amount: totalToPay }];
+              }
+              return prevSources;
+          });
+      }
+  }, [paymentBreakdown, isPaymentModalOpen]);
 
   const loadData = async () => {
     const c = await payrollService.getConfig();
     const e = await payrollService.getEmployees();
     const h = await payrollService.getHistory();
-    setConfig(c);
-    setEmployees(e);
-    setHistory(h);
+    const w = await walletService.getAccounts();
+    setConfig(c); setEmployees(e); setHistory(h); setWallets(w);
   };
 
-  // --- HANDLERS ---
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (pinInput === PIN_CODE) {
-      setIsAuthenticated(true);
-    } else {
-      setAuthError(true);
-      setPinInput("");
-    }
-  };
+  const showFeedback = (message: string, type: 'success' | 'error' = 'success') => setFeedback({ message, type });
 
-  const handleOpenConfig = () => {
-      if(config) setTempConfig(JSON.parse(JSON.stringify(config))); // Deep copy
-      setIsConfigModalOpen(true);
-  };
-
-  const handleSaveConfig = async (newConfig?: PayrollConfig) => {
-    const configToSave = newConfig || tempConfig;
-    if (!configToSave) return;
-    
-    await payrollService.saveConfig(configToSave);
-    setConfig(configToSave);
-    
-    // Only close modal if we were saving from the modal state (no arg passed)
-    if (!newConfig) {
-        setIsConfigModalOpen(false);
-    }
-  };
-
-  const handleSaveEmployee = async () => {
-    if (!employeeForm.fullName || !employeeForm.role) return;
-    
-    const newEmp: Employee = {
-      id: editingEmployee?.id || crypto.randomUUID(),
-      fullName: employeeForm.fullName,
-      role: employeeForm.role as any,
-      bonus: Number(employeeForm.bonus) || 0,
-      active: employeeForm.active ?? true,
-      joinedAt: editingEmployee?.joinedAt || Date.now()
-    };
-
-    await payrollService.saveEmployee(newEmp);
-    await loadData();
-    setEditingEmployee(null);
-    setEmployeeForm({});
-  };
-
-  const handleDeleteEmployee = async (id: string) => {
-    if (confirm("¿Está seguro de eliminar definitivamente este registro? Para ocultarlo de los informes, mejor use la opción 'Desactivar'.")) {
-      await payrollService.deleteEmployee(id);
-      loadData();
-    }
-  };
-
-  const handleToggleActive = async (emp: Employee) => {
-      const updated = { ...emp, active: !emp.active };
-      await payrollService.saveEmployee(updated);
-      await loadData();
-  };
-
-  const handleOpenPayslip = (emp: Employee) => {
-    if (!config) return;
-    const salary = calculateSalary(emp, config);
-    setCurrentPayslip({
-      employee: emp,
-      salaryDetails: salary,
-      month: new Date().toLocaleString('es-ES', { month: 'long', year: 'numeric' })
-    });
-    setPayslipForm({ message: '', tasks: '', goals: '' });
-    setShowPayslipModal(true);
+  const formatMoney = (amount: number) => {
+      if (!config) return { cop: '$ 0', eur: '€ 0', val: 0, element: <></> };
+      const cop = amount.toLocaleString('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 });
+      const eurVal = amount / config.euroExchangeRate;
+      const eur = eurVal.toLocaleString('es-ES', { style: 'currency', currency: 'EUR', maximumFractionDigits: 2 });
+      return { val: amount, cop, eur, element: (<div className="flex flex-col items-end leading-tight"><span className="font-bold whitespace-nowrap">{cop}</span><span className="text-[10px] text-amber-500 font-mono whitespace-nowrap">{eur}</span></div>) };
   };
 
   const calculateSalary = (emp: Employee, cfg: PayrollConfig) => {
     const roleDef = cfg.roles.find(r => r.name === emp.role);
     const multiplier = roleDef ? roleDef.multiplier : 1;
-    
     const baseCalc = cfg.baseSalary * multiplier;
-    const christmas = baseCalc * 0.5;
-    return {
-      base: baseCalc,
-      total: baseCalc + christmas + emp.bonus,
-      christmas
-    };
+    const today = new Date();
+    const currentMonth = today.getMonth(); 
+    const isPrimaMonth = currentMonth === 5 || currentMonth === 11;
+    const christmas = isPrimaMonth ? baseCalc * 0.5 : 0;
+    return { base: baseCalc, total: baseCalc + christmas + emp.bonus, christmas };
   };
 
-  const getTotalPayrollCost = () => {
-    if (!config) return 0;
-    // Only sum ACTIVE employees
-    return employees
-        .filter(e => e.active)
-        .reduce((acc, emp) => {
+  const getPaymentStatus = (emp: Employee) => {
+      if (!config) return { paid: 0, totalDue: 0, remaining: 0 };
+      const financials = calculateSalary(emp, config);
+      const now = new Date();
+      const currentMonth = now.getMonth();
+      const currentYear = now.getFullYear();
+      const paidSoFar = history.filter(record => {
+            const rDate = new Date(record.date);
+            return rDate.getMonth() === currentMonth && rDate.getFullYear() === currentYear && record.employeeId === emp.id;
+        }).reduce((acc, record) => acc + record.totalPaid, 0);
+      return { paid: paidSoFar, totalDue: financials.total, remaining: Math.max(0, financials.total - paidSoFar), baseSalary: financials.base, bonus: emp.bonus, christmas: financials.christmas };
+  };
+
+  const payrollMetrics = useMemo(() => {
+    if (!config) return { base: 0, bonus: 0, prima: 0, total: 0 };
+    return employees.filter(e => e.active).reduce((acc, emp) => {
             const sal = calculateSalary(emp, config);
-            return acc + sal.total;
-        }, 0);
+            return { base: acc.base + sal.base, bonus: acc.bonus + emp.bonus, prima: acc.prima + sal.christmas, total: acc.total + sal.total };
+        }, { base: 0, bonus: 0, prima: 0, total: 0 });
+  }, [employees, config]);
+  
+  const paymentOverview = useMemo(() => {
+      if (!config) return { paid: 0, pending: 0, total: 0, progress: 0, fullyPaidCount: 0 };
+      const now = new Date();
+      const currentMonth = now.getMonth();
+      const currentYear = now.getFullYear();
+      const totalToPay = payrollMetrics.total;
+      const paidThisMonth = history.filter(r => {
+              const d = new Date(r.date);
+              return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+          }).reduce((acc, r) => acc + r.totalPaid, 0);
+      const activeEmployees = employees.filter(e => e.active);
+      let fullyPaidCount = 0;
+      activeEmployees.forEach(emp => { if (getPaymentStatus(emp).remaining <= 100) fullyPaidCount++; });
+      return { paid: paidThisMonth, pending: Math.max(0, totalToPay - paidThisMonth), total: totalToPay, progress: totalToPay > 0 ? (paidThisMonth / totalToPay) * 100 : 0, fullyPaidCount, totalEmployees: activeEmployees.length };
+  }, [payrollMetrics, history, employees, config]);
+
+  const getTotalTreasury = () => {
+      if (!config) return 0;
+      return wallets.reduce((acc, w) => {
+          if (w.currency === 'COP') return acc + w.balance;
+          return acc + (w.balance * config.euroExchangeRate);
+      }, 0);
+  };
+  
+  const filteredHistory = useMemo(() => {
+      return history.filter(record => {
+          const date = new Date(record.date);
+          const matchesDate = date.getMonth() === historyMonth && date.getFullYear() === historyYear;
+          const matchesEmployee = historyEmployeeFilter === 'all' || record.employeeId === historyEmployeeFilter;
+          return matchesDate && matchesEmployee;
+      }).sort((a,b) => b.date - a.date);
+  }, [history, historyMonth, historyYear, historyEmployeeFilter]);
+
+  const historyTotals = useMemo(() => {
+      return filteredHistory.reduce((acc, curr) => {
+          return {
+              total: acc.total + curr.totalPaid,
+              base: acc.base + (curr.breakdown?.baseSalary || 0),
+              prima: acc.prima + (curr.breakdown?.christmasBonus || 0),
+              bonus: acc.bonus + (curr.breakdown?.extraBonus || 0)
+          };
+      }, { total: 0, base: 0, prima: 0, bonus: 0 });
+  }, [filteredHistory]);
+
+  const handleOpenPayslip = (emp: Employee) => {
+      if (!config) return;
+      const financials = calculateSalary(emp, config);
+      const stats = getPaymentStatus(emp);
+      const now = new Date();
+      const monthStr = now.toLocaleString('es-ES', { month: 'long', year: 'numeric' }).toUpperCase();
+      setCurrentPayslip({ employee: emp, salaryDetails: financials, month: monthStr, pendingBalance: stats.remaining });
+      setShowPayslipModal(true);
   };
 
-  // Roles management within config
-  const handleAddRole = () => {
-      if(!tempConfig) return;
-      const newRole: RoleDefinition = {
-          id: crypto.randomUUID(),
-          name: "Nuevo Cargo",
-          multiplier: 1.0
+  const handleOpenHistoryPayslip = (record: PaymentRecord) => {
+      const dateObj = new Date(record.date);
+      const monthStr = dateObj.toLocaleString('es-ES', { month: 'long', year: 'numeric' }).toUpperCase();
+      let pending = 0;
+      if (config) {
+          const emp = employees.find(e => e.id === record.employeeId);
+          const baseVal = config.baseSalary * (record.roleMultiplier || 1);
+          const isPrima = dateObj.getMonth() === 5 || dateObj.getMonth() === 11;
+          const primaVal = isPrima ? baseVal * 0.5 : 0;
+          const bonusVal = emp?.bonus || 0;
+          const totalMonthDue = baseVal + primaVal + bonusVal;
+          const paidInMonth = history.filter(r => {
+              const d = new Date(r.date);
+              return d.getMonth() === dateObj.getMonth() && d.getFullYear() === dateObj.getFullYear() && r.employeeId === record.employeeId;
+          }).reduce((acc, r) => acc + r.totalPaid, 0);
+          pending = Math.max(0, totalMonthDue - paidInMonth);
+      }
+      setCurrentPayslip({
+          employee: { id: record.employeeId, fullName: record.employeeName, role: record.role, active: true, bonus: record.breakdown?.extraBonus || record.extraBonus || 0, joinedAt: 0 },
+          salaryDetails: { base: record.breakdown?.baseSalary || record.baseSalary, christmas: record.breakdown?.christmasBonus || record.christmasBonus, total: record.totalPaid },
+          month: monthStr, pendingBalance: pending
+      });
+      setShowPayslipModal(true);
+  };
+
+  const handleSaveConfig = async (newConfig: PayrollConfig) => { await payrollService.saveConfig(newConfig); setConfig(newConfig); showFeedback("Configuración actualizada."); };
+  const handleSaveEmployee = async () => { if (!employeeForm.fullName) return; const newEmp: Employee = { id: editingEmployee?.id || crypto.randomUUID(), fullName: employeeForm.fullName, role: employeeForm.role as any, bonus: Number(employeeForm.bonus) || 0, active: employeeForm.active ?? true, joinedAt: editingEmployee?.joinedAt || Date.now() }; await payrollService.saveEmployee(newEmp); await loadData(); showFeedback("Guardado"); setEditingEmployee(null); setEmployeeForm({}); };
+  const handleDeleteEmployee = async (id: string) => { if (confirm("¿Está seguro de eliminar este registro?")) { await payrollService.deleteEmployee(id); await loadData(); showFeedback("Eliminado", 'error'); } };
+  const handleToggleActive = async (emp: Employee) => { const updated = { ...emp, active: !emp.active }; await payrollService.saveEmployee(updated); await loadData(); showFeedback(`Estado actualizado: ${updated.active ? 'Activo' : 'Inactivo'}`, updated.active ? 'success' : 'error'); };
+
+  const handleOpenPaymentModal = async (emp: Employee) => { 
+      if (!config) return;
+      const freshWallets = await walletService.getAccounts();
+      setWallets(freshWallets);
+      if (freshWallets.length === 0) { alert("⚠️ NO HAY CUENTAS ACTIVAS\n\nDebes crear al menos una cuenta en 'Tesorería'."); return; }
+      const financials = calculateSalary(emp, config); setActivePaymentEmployee(emp); setEditingPaymentId(null); setPaymentBreakdown({ baseSalary: financials.base, christmasBonus: financials.christmas, extraBonus: emp.bonus }); 
+      const bestWallet = freshWallets.find(w => w.balance > 0); setPaymentSources(bestWallet ? [{ walletId: bestWallet.id, amount: financials.total }] : []); setPaymentDate(new Date().toISOString().split('T')[0]); setPaymentNotes(''); setIsPaymentModalOpen(true); 
+  };
+
+  const handleEditPaymentRecord = (record: PaymentRecord) => {
+      const emp = employees.find(e => e.id === record.employeeId);
+      if (!emp) { alert("El empleado asociado a este pago ya no existe."); return; }
+      setActivePaymentEmployee(emp); setEditingPaymentId(record.id); setPaymentBreakdown(record.breakdown || { baseSalary: record.baseSalary, christmasBonus: record.christmasBonus, extraBonus: record.extraBonus });
+      if (record.fundSources && record.fundSources.length > 0) setPaymentSources(record.fundSources);
+      else if (record.sourceWalletId) setPaymentSources([{ walletId: record.sourceWalletId, amount: record.totalPaid }]);
+      else setPaymentSources([]);
+      setPaymentDate(new Date(record.date).toISOString().split('T')[0]); setPaymentNotes(record.notes || ''); setIsPaymentModalOpen(true);
+  };
+
+  const handleRequestDeleteRecord = (record: PaymentRecord) => { const hasWallet = record.fundSources && record.fundSources.length > 0 && record.fundSources.some(s => !!s.walletId); setConfirmDeleteModal({ isOpen: true, record: record, refundMoney: !!hasWallet }); };
+  const handleConfirmDeleteRecord = async () => {
+      const { record, refundMoney } = confirmDeleteModal;
+      if (!record) return;
+      if (refundMoney && config) {
+          const sources = record.fundSources || (record.sourceWalletId ? [{ walletId: record.sourceWalletId, amount: record.totalPaid }] : []);
+          for (const source of sources) { if (source.amount > 0 && source.walletId) await walletService.processTransaction(source.walletId, source.amount, 'income', config.euroExchangeRate); }
+          showFeedback("Dinero devuelto a las cuentas.");
+      }
+      if (record.linkedExpenseId) try { await revenueService.deleteExpense(record.linkedExpenseId); } catch (e) { console.warn("Could not delete linked expense", e); }
+      await payrollService.deletePayment(record.id); loadData(); setConfirmDeleteModal({ isOpen: false, record: null, refundMoney: false });
+  };
+
+  const handleAddSource = () => { const unused = wallets.find(w => !paymentSources.find(ps => ps.walletId === w.id)); setPaymentSources([...paymentSources, { walletId: unused?.id || wallets[0]?.id || '', amount: 0 }]); };
+  const handleRemoveSource = (i: number) => { const n = [...paymentSources]; n.splice(i, 1); setPaymentSources(n); };
+  const handleSourceChange = (i: number, f: keyof PaymentSource, v: any) => { const n = [...paymentSources]; n[i] = { ...n[i], [f]: v }; setPaymentSources(n); };
+  
+  const handleProcessPayment = async () => {
+      if (!activePaymentEmployee || !config) return;
+      const totalToPay = paymentBreakdown.baseSalary + paymentBreakdown.christmasBonus + paymentBreakdown.extraBonus;
+      if (paymentSources.some(s => !s.walletId)) { alert("⚠️ Por favor selecciona una 'Billetera de Origen' para cada monto."); return; }
+      const roleDef = config.roles.find(r => r.name === activePaymentEmployee.role);
+      const financials = calculateSalary(activePaymentEmployee, config);
+      const [y, m, d] = paymentDate.split('-').map(Number);
+      const recordDateTimestamp = new Date(y, m - 1, d, 12).getTime();
+      const paymentId = editingPaymentId || crypto.randomUUID();
+      const expenseId = crypto.randomUUID();
+      const record: PaymentRecord = {
+          id: paymentId, date: recordDateTimestamp, employeeId: activePaymentEmployee.id, employeeName: activePaymentEmployee.fullName, role: activePaymentEmployee.role, baseSalary: financials.base, roleMultiplier: roleDef ? roleDef.multiplier : 1, calculatedSalary: financials.total, christmasBonus: paymentBreakdown.christmasBonus, extraBonus: paymentBreakdown.extraBonus, totalPaid: totalToPay, notes: paymentNotes, sourceWalletId: paymentSources[0]?.walletId || '', fundSources: paymentSources, breakdown: paymentBreakdown, linkedExpenseId: !editingPaymentId ? expenseId : undefined 
       };
-      setTempConfig({
-          ...tempConfig,
-          roles: [...tempConfig.roles, newRole]
-      });
+      try {
+          await payrollService.savePayment(record);
+          if (!editingPaymentId) {
+              try {
+                  for (const source of paymentSources) { 
+                      if (source.amount > 0) {
+                          const walletExists = wallets.find(w => w.id === source.walletId);
+                          if (!walletExists) throw new Error(`Billetera no encontrada: ID ${source.walletId}`);
+                          await walletService.processTransaction(source.walletId, source.amount, 'expense', config.euroExchangeRate);
+                          const expenseRecord: ExpenseRecord = { id: expenseId, title: `Nómina: ${activePaymentEmployee.role}`, amount: source.amount, category: 'other', date: recordDateTimestamp, description: `Pago a ${activePaymentEmployee.fullName}. (Fuente: ${walletExists.name || 'Caja'})`, sourceWalletId: source.walletId };
+                          await revenueService.saveExpense(expenseRecord);
+                      }
+                  }
+                  showFeedback("Pago registrado y sincronizado en finanzas");
+              } catch (walletError: any) {
+                  console.error("Wallet deduction failed", walletError);
+                  await payrollService.deletePayment(record.id); 
+                  alert(`❌ ERROR DE TRANSACCIÓN BANCARIA:\n\n${walletError.message}\n\nEl registro del pago ha sido revertido.`);
+                  return;
+              }
+          } else showFeedback("Registro actualizado.");
+          await loadData(); setIsPaymentModalOpen(false); 
+      } catch (e: any) { alert(e.message); }
   };
-
-  const handleRemoveRole = (roleId: string) => {
-      if(!tempConfig) return;
-      setTempConfig({
-          ...tempConfig,
-          roles: tempConfig.roles.filter(r => r.id !== roleId)
-      });
-  };
-
-  const handleUpdateRole = (roleId: string, field: keyof RoleDefinition, value: string | number) => {
-      if(!tempConfig) return;
-      setTempConfig({
-          ...tempConfig,
-          roles: tempConfig.roles.map(r => r.id === roleId ? { ...r, [field]: value } : r)
-      });
-  };
-
-  // --- RENDER: LOGIN ---
-  if (!isAuthenticated) {
-    return (
-      <div className="flex h-full items-center justify-center bg-slate-950">
-        <div className="w-full max-w-md p-8 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl text-center">
-          <div className="w-16 h-16 bg-amber-500/10 rounded-full flex items-center justify-center mx-auto mb-6">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8 text-amber-500">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z" />
-            </svg>
-          </div>
-          <h2 className="text-2xl font-bold text-white mb-2">Acceso Ejecutivo</h2>
-          <p className="text-slate-500 mb-6">Sistema de Control de Nómina</p>
-          
-          <form onSubmit={handleLogin}>
-            <input 
-              type="password" 
-              autoFocus
-              className="w-full bg-slate-950 border border-slate-700 text-center text-2xl tracking-widest text-white rounded-lg py-3 mb-4 focus:ring-2 focus:ring-amber-500 outline-none"
-              placeholder="••••••"
-              maxLength={6}
-              value={pinInput}
-              onChange={(e) => setPinInput(e.target.value)}
-            />
-            {authError && <p className="text-red-500 text-sm mb-4">Credenciales inválidas.</p>}
-            <button 
-              type="submit"
-              className="w-full bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-500 hover:to-amber-600 text-white font-bold py-3 rounded-lg transition-all"
-            >
-              ACCEDER
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
 
   if (!config) return <div className="p-10 text-center text-slate-500">Cargando sistema financiero...</div>;
+  const totalCostMoney = formatMoney(payrollMetrics.total);
+  const totalTreasuryMoney = formatMoney(getTotalTreasury());
+  const treasuryUsage = getTotalTreasury() > 0 ? (payrollMetrics.total / getTotalTreasury()) * 100 : 0;
 
-  const totalCostCOP = getTotalPayrollCost();
-  const totalCostEUR = totalCostCOP / config.euroExchangeRate;
-  const budgetUsage = (totalCostCOP / config.totalBudget) * 100;
-  
-  // Filter for dashboard counts
-  const activeEmployeesCount = employees.filter(e => e.active).length;
-
-  // --- RENDER: MAIN APP ---
   return (
-    <div className="p-6 md:p-10 max-w-7xl mx-auto pb-20">
-      
-      {/* HEADER */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4 border-b border-slate-800 pb-6">
+    <div className="h-full flex flex-col bg-[#0f172a]">
+      {feedback && <div className="fixed top-24 right-10 z-[100] bg-emerald-600 text-white px-6 py-4 rounded-xl shadow-2xl animate-in fade-in slide-in-from-right-10"><p>{feedback.message}</p></div>}
+
+      {/* HEADER UNIFICADO */}
+      <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/50 backdrop-blur-md shrink-0 flex flex-col md:flex-row justify-between items-center gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-white">Panel Ejecutivo</h1>
-          <p className="text-amber-500/80 font-medium">Control Financiero y Nómina</p>
+            <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+                <span className="bg-amber-600 p-1.5 rounded-lg text-white">$$</span>
+                Panel Ejecutivo
+                <button onClick={() => setIsConfigModalOpen(true)} className="text-slate-500 hover:text-white transition-colors p-1 rounded-lg hover:bg-slate-800" title="Configuración">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.581-.495.644-.869l.214-1.281z" /><path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                </button>
+            </h1>
+            <p className="text-amber-500/80 font-medium text-sm">Control Financiero y Nómina</p>
         </div>
-        <div className="flex gap-2">
-           <button 
-             onClick={() => setView('dashboard')} 
-             className={`px-4 py-2 rounded-lg font-medium transition-all ${view === 'dashboard' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-white'}`}
-           >
-             Dashboard
-           </button>
-           <button 
-             onClick={() => setView('employees')} 
-             className={`px-4 py-2 rounded-lg font-medium transition-all ${view === 'employees' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-white'}`}
-           >
-             Personal
-           </button>
-           <button 
-             onClick={() => setView('history')} 
-             className={`px-4 py-2 rounded-lg font-medium transition-all ${view === 'history' ? 'bg-amber-600 text-white' : 'text-slate-400 hover:text-white'}`}
-           >
-             Histórico
-           </button>
+        <div className="flex bg-slate-950 p-1 rounded-xl">
+           {['dashboard', 'employees', 'payments', 'history'].map(v => (
+               <button key={v} onClick={() => setView(v as any)} className={`px-4 py-2 rounded-lg font-medium text-sm capitalize transition-all ${view === v ? 'bg-amber-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}>
+                   {v === 'history' ? 'Informes' : v === 'employees' ? 'Personal' : v === 'payments' ? 'Pagos' : 'Resumen'}
+               </button>
+           ))}
         </div>
       </div>
 
-      {/* VIEW: DASHBOARD */}
-      {view === 'dashboard' && (
-        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
-          
-          {/* KPI CARDS */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-             {/* Total Cost */}
-             <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl relative overflow-hidden group">
-                <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-24 h-24 text-amber-500">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m-3-2.818l.879.659c1.171.879 3.07.879 4.242 0 1.172-.879 1.172-2.303 0-3.182C13.536 12.219 12.768 12 12 12c-.725 0-1.45-.22-2.003-.659-1.106-.879-1.106-2.303 0-3.182s2.9-.879 4.006 0l.415.33M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
+      <div className="flex-1 overflow-y-auto custom-scrollbar p-6 md:p-8">
+          {view === 'dashboard' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in">
+                <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl relative overflow-hidden">
+                    <p className="text-slate-500 text-xs font-bold uppercase mb-2">Nómina Mensual</p>
+                    <h3 className="text-3xl font-bold text-white mb-1">{totalCostMoney.cop}</h3>
+                    <p className="text-amber-500 font-mono text-sm">{totalCostMoney.eur}</p>
+                    <div className="mt-4 space-y-2 text-xs bg-slate-950 p-3 rounded-lg border border-slate-800">
+                        <div className="flex justify-between text-slate-400"><span>Base:</span><span className="text-white">{formatMoney(payrollMetrics.base).cop}</span></div>
+                        <div className="flex justify-between text-slate-400"><span>Prima:</span><span className="text-amber-400">{formatMoney(payrollMetrics.prima).cop}</span></div>
+                    </div>
                 </div>
-                <p className="text-slate-500 text-sm font-bold uppercase tracking-wider mb-1">Nómina Mensual Activa</p>
-                <h3 className="text-3xl font-bold text-white mb-1">
-                   $ {totalCostCOP.toLocaleString('es-CO')}
-                </h3>
-                <p className="text-amber-500 font-mono text-sm">
-                   € {totalCostEUR.toLocaleString('es-ES', { maximumFractionDigits: 2 })}
-                </p>
-                <div className="mt-4 flex items-center gap-2 text-xs text-slate-500">
-                    <span>Tasa Cambio:</span>
-                    <input 
-                      type="number" 
-                      value={config.euroExchangeRate}
-                      onChange={(e) => {
-                          const val = parseFloat(e.target.value);
-                          if(val > 0) handleSaveConfig({...config, euroExchangeRate: val} as any);
-                      }}
-                      className="bg-slate-950 border border-slate-700 w-20 px-2 py-0.5 rounded text-white"
-                    />
-                    <span>COP/EUR</span>
+                <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+                    <p className="text-slate-500 text-xs font-bold uppercase mb-2">Total Tesorería</p>
+                    <h3 className="text-3xl font-bold text-white mb-1">{totalTreasuryMoney.cop}</h3>
+                    <div className="mt-4"><span className={`text-xs font-bold px-2 py-1 rounded ${treasuryUsage > 90 ? 'bg-red-900/30 text-red-400' : 'bg-emerald-900/30 text-emerald-400'}`}>{treasuryUsage.toFixed(1)}% Cobertura</span></div>
                 </div>
-             </div>
+                <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+                    <p className="text-slate-500 text-xs font-bold uppercase mb-2">Personal Activo</p>
+                    <h3 className="text-4xl font-bold text-white">{employees.filter(e => e.active).length}</h3>
+                    <div className="mt-4 grid grid-cols-2 gap-2 text-[10px]">
+                        {config.roles.map(r => {
+                            const count = employees.filter(e => e.active && e.role === r.name).length;
+                            return count > 0 && <div key={r.id} className="flex justify-between bg-slate-950 px-2 py-1 rounded text-slate-400"><span>{r.name}</span><span className="text-white">{count}</span></div>;
+                        })}
+                    </div>
+                </div>
+            </div>
+          )}
 
-             {/* Budget Health */}
-             <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
-                <p className="text-slate-500 text-sm font-bold uppercase tracking-wider mb-2">Presupuesto Asignado</p>
-                <div className="flex items-end justify-between mb-2">
-                    <h3 className="text-2xl font-bold text-white">$ {config.totalBudget.toLocaleString('es-CO')}</h3>
-                    <span className={`text-sm font-bold ${budgetUsage > 90 ? 'text-red-500' : 'text-emerald-500'}`}>
-                        {budgetUsage.toFixed(1)}% Uso
-                    </span>
-                </div>
-                <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden">
-                    <div 
-                        className={`h-full ${budgetUsage > 90 ? 'bg-red-500' : 'bg-emerald-500'}`} 
-                        style={{ width: `${Math.min(budgetUsage, 100)}%` }}
-                    ></div>
-                </div>
-                <button 
-                  onClick={handleOpenConfig}
-                  className="mt-4 text-xs text-amber-500 hover:text-amber-400 font-medium"
-                >
-                    Ajustar Presupuesto Global →
-                </button>
-             </div>
-
-             {/* Employees Count */}
-             <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex items-center justify-between">
-                <div>
-                    <p className="text-slate-500 text-sm font-bold uppercase tracking-wider mb-1">Total Personal</p>
-                    <h3 className="text-4xl font-bold text-white">{activeEmployeesCount}</h3>
-                    <p className="text-slate-400 text-sm mt-1">Activos en nómina</p>
-                    {employees.length > activeEmployeesCount && (
-                        <p className="text-slate-600 text-xs mt-1">
-                            (+{employees.length - activeEmployeesCount} inactivos)
-                        </p>
-                    )}
-                </div>
-                <div className="h-12 w-12 rounded-full bg-slate-800 flex items-center justify-center text-slate-400">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.964-3.07M12 6.375a3.375 3.375 0 11-6.75 0 3.375 3.375 0 016.75 0zm8.25 2.25a2.625 2.625 0 11-5.25 0 2.625 2.625 0 015.25 0z" />
-                    </svg>
-                </div>
-             </div>
-          </div>
-
-          {/* Config Summary Table */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-             <div className="bg-slate-800/50 px-6 py-4 border-b border-slate-800 flex justify-between items-center">
-                 <h3 className="font-bold text-white">Configuración Salarial Base & Roles</h3>
-                 <button onClick={handleOpenConfig} className="text-amber-500 hover:text-white text-sm">Editar Configuración</button>
-             </div>
-             <div className="p-6">
-                 <div className="mb-4">
-                     <p className="text-slate-500 mb-1 text-sm">Salario Mínimo Base</p>
-                     <p className="text-white font-bold text-xl">$ {config.baseSalary.toLocaleString('es-CO')}</p>
-                 </div>
-                 
-                 <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                     {config.roles.map(role => (
-                         <div key={role.id} className="bg-slate-950 p-3 rounded border border-slate-800">
-                             <p className="text-slate-500 text-xs mb-1 truncate" title={role.name}>{role.name}</p>
-                             <p className="text-white font-mono text-sm">x{role.multiplier}</p>
-                         </div>
-                     ))}
-                 </div>
-             </div>
-          </div>
-        </div>
-      )}
-
-      {/* VIEW: EMPLOYEES */}
-      {view === 'employees' && (
-        <div className="space-y-6 animate-in fade-in slide-in-from-right-4">
-           <div className="flex justify-between items-center">
-               <h2 className="text-xl font-bold text-white">Nómina de Personal</h2>
-               <button 
-                 onClick={() => { setEditingEmployee(null); setEmployeeForm({ fullName: '', role: config.roles[0]?.name || '', bonus: 0, active: true }); }}
-                 className="bg-amber-600 hover:bg-amber-500 text-white px-4 py-2 rounded-lg font-bold text-sm shadow-lg shadow-amber-900/20"
-                 style={{ display: editingEmployee === null && employeeForm.fullName === undefined ? 'block' : 'none' }}
-               >
-                 + Nuevo Empleado
-               </button>
-           </div>
-
-           {/* Add/Edit Form Inline (Simple Toggle) */}
-           {(editingEmployee !== null || Object.keys(employeeForm).length > 0) && (
-               <div className="bg-slate-900 border border-amber-500/30 p-6 rounded-xl mb-6 animate-in fade-in slide-in-from-top-2">
-                   <h3 className="text-white font-bold mb-4">{editingEmployee ? 'Editar Empleado' : 'Nuevo Empleado'}</h3>
-                   <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
-                       <input 
-                         type="text" 
-                         placeholder="Nombre Completo" 
-                         className="bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white outline-none focus:border-amber-500 md:col-span-2"
-                         value={employeeForm.fullName || ''}
-                         onChange={e => setEmployeeForm({...employeeForm, fullName: e.target.value})}
-                         autoFocus
-                       />
-                       <select
-                         className="bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white outline-none focus:border-amber-500"
-                         value={employeeForm.role || ''}
-                         onChange={e => setEmployeeForm({...employeeForm, role: e.target.value})}
-                       >
-                           <option value="">Seleccionar Rol...</option>
-                           {config.roles.map(r => (
-                               <option key={r.id} value={r.name}>{r.name} (x{r.multiplier})</option>
-                           ))}
-                       </select>
-                       <input 
-                         type="number" 
-                         placeholder="Bonificación Extra ($)" 
-                         className="bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white outline-none focus:border-amber-500"
-                         value={employeeForm.bonus || ''}
-                         onChange={e => setEmployeeForm({...employeeForm, bonus: parseFloat(e.target.value)})}
-                       />
+          {view === 'employees' && (
+            <div className="space-y-6 animate-in fade-in">
+               <div className="flex justify-between items-center"><h2 className="text-xl font-bold text-white">Personal</h2><button onClick={() => { setEditingEmployee(null); setEmployeeForm({ fullName: '', role: config.roles[0]?.name || '', bonus: 0, active: true }); }} className="bg-amber-600 hover:bg-amber-500 text-white px-4 py-2 rounded-lg font-bold text-sm">+ Nuevo</button></div>
+               {(editingEmployee !== null || Object.keys(employeeForm).length > 0) && (
+                   <div className="bg-slate-900 border border-amber-500/30 p-6 rounded-xl mb-6 grid grid-cols-1 md:grid-cols-4 gap-4">
+                       <input type="text" placeholder="Nombre" className="bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white outline-none focus:border-amber-500 md:col-span-2" value={employeeForm.fullName || ''} onChange={e => setEmployeeForm({...employeeForm, fullName: e.target.value})} />
+                       <select className="bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white outline-none focus:border-amber-500" value={employeeForm.role || ''} onChange={e => setEmployeeForm({...employeeForm, role: e.target.value})}>{config.roles.map(r => (<option key={r.id} value={r.name}>{r.name} (x{r.multiplier})</option>))}</select>
+                       <div className="flex gap-2"><button onClick={handleSaveEmployee} className="flex-1 bg-emerald-600 text-white rounded font-bold">Guardar</button><button onClick={() => { setEditingEmployee(null); setEmployeeForm({}); }} className="flex-1 bg-slate-800 text-slate-400 rounded">Cancel</button></div>
                    </div>
-                   <div className="flex gap-3">
-                       <button onClick={handleSaveEmployee} className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded font-bold transition-colors">Guardar</button>
-                       <button onClick={() => { setEditingEmployee(null); setEmployeeForm({}); }} className="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded transition-colors">Cancelar</button>
-                   </div>
+               )}
+               <div className="grid grid-cols-1 gap-3">
+                   {employees.map(emp => {
+                       const f = calculateSalary(emp, config);
+                       return (
+                           <div key={emp.id} className={`bg-slate-900 border p-4 rounded-xl flex items-center justify-between gap-4 ${!emp.active ? 'border-red-900/30 opacity-60' : 'border-slate-800'}`}>
+                               <div className="flex items-center gap-4">
+                                   <div className="w-10 h-10 bg-slate-800 rounded-full flex items-center justify-center font-bold text-slate-400">{emp.fullName.charAt(0)}</div>
+                                   <div><h3 className="text-white font-bold">{emp.fullName}</h3><span className="text-xs uppercase font-bold text-slate-500">{emp.role}</span></div>
+                               </div>
+                               <div className="hidden md:flex gap-6 text-sm">
+                                   <div><span className="text-slate-500 text-xs block">Base</span><span className="text-white font-mono">{formatMoney(f.base).cop}</span></div>
+                                   <div><span className="text-slate-500 text-xs block">Total</span><span className="text-amber-400 font-mono font-bold">{formatMoney(f.total).cop}</span></div>
+                               </div>
+                               <div className="flex gap-2">
+                                   <button onClick={() => handleToggleActive(emp)} className={`p-1.5 border rounded-lg ${emp.active ? 'border-emerald-500/30 text-emerald-500' : 'border-red-500/30 text-red-500'}`}>O/I</button>
+                                   <button onClick={() => { setEditingEmployee(emp); setEmployeeForm(emp); }} className="p-1.5 bg-slate-800 rounded-lg text-blue-400">✎</button>
+                                   <button onClick={() => handleDeleteEmployee(emp.id)} className="p-1.5 bg-slate-800 rounded-lg text-red-400">✕</button>
+                                   <button onClick={() => handleOpenPayslip(emp)} className="p-1.5 bg-slate-800 rounded-lg text-purple-400">📄</button>
+                               </div>
+                           </div>
+                       );
+                   })}
                </div>
-           )}
+            </div>
+          )}
 
-           <div className="grid grid-cols-1 gap-4">
-               {employees.map(emp => {
-                   const financials = calculateSalary(emp, config);
-                   const isInactive = !emp.active;
+          {view === 'payments' && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-in fade-in">
+                 {employees.filter(e => e.active).map(emp => {
+                     const status = getPaymentStatus(emp);
+                     return (
+                         <div key={emp.id} className="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex flex-col justify-between hover:border-amber-500/30 transition-colors">
+                             <div className="mb-4"><h3 className="text-lg font-bold text-white">{emp.fullName}</h3><p className="text-slate-500 text-xs">{emp.role}</p></div>
+                             <div className="space-y-2 mb-4 bg-slate-950 p-4 rounded-xl border border-slate-800">
+                                 <div className="flex justify-between text-sm text-slate-500"><span>Total</span><span className="text-slate-300">{formatMoney(status.totalDue).cop}</span></div>
+                                 <div className="flex justify-between text-lg font-bold text-amber-400 border-t border-slate-800 pt-2 mt-2"><span>Restante</span><span>{formatMoney(status.remaining).cop}</span></div>
+                             </div>
+                             <button onClick={() => handleOpenPaymentModal(emp)} disabled={status.remaining <= 0} className={`w-full py-3 rounded-xl font-bold shadow-lg ${status.remaining > 0 ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-500'}`}>{status.remaining > 0 ? 'Procesar Pago' : 'Pagado'}</button>
+                         </div>
+                     );
+                 })}
+            </div>
+          )}
 
-                   return (
-                       <div key={emp.id} className={`bg-slate-900 border p-6 rounded-xl flex flex-col md:flex-row items-center justify-between gap-6 transition-all ${isInactive ? 'border-slate-800 opacity-60 grayscale-[0.5]' : 'border-slate-800 hover:border-slate-700'}`}>
-                           <div className="flex items-center gap-4 w-full md:w-auto">
-                               <div className={`w-12 h-12 rounded-full flex items-center justify-center font-bold text-lg relative ${
-                                   emp.role.includes('CEO') ? 'bg-amber-500 text-black' : 
-                                   emp.role.includes('Senior') ? 'bg-slate-700 text-white' : 'bg-slate-800 text-slate-400 border border-slate-700'
-                               }`}>
-                                   {emp.fullName.charAt(0)}
-                                   {isInactive && (
-                                       <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full border border-slate-900"></span>
-                                   )}
-                               </div>
-                               <div>
-                                   <div className="flex items-center gap-2">
-                                       <h3 className="text-white font-bold text-lg">{emp.fullName}</h3>
-                                       {isInactive && <span className="text-[10px] bg-red-900/50 text-red-300 px-1.5 py-0.5 rounded uppercase font-bold">Inactivo</span>}
-                                   </div>
-                                   <span className="text-xs uppercase font-bold tracking-wider text-slate-500">{emp.role}</span>
-                               </div>
-                           </div>
-                           
-                           <div className="flex-1 grid grid-cols-2 md:grid-cols-3 gap-4 w-full md:w-auto text-sm">
-                               <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                                   <p className="text-slate-500 text-xs">Sueldo Base</p>
-                                   <p className="text-slate-300">$ {financials.base.toLocaleString()}</p>
-                               </div>
-                               <div className="bg-slate-950 p-2 rounded border border-slate-800">
-                                   <p className="text-slate-500 text-xs">Prima Navidad</p>
-                                   <p className="text-amber-500/80">$ {financials.christmas.toLocaleString()}</p>
-                               </div>
-                               <div className="bg-slate-950 p-2 rounded border border-slate-800 col-span-2 md:col-span-1">
-                                   <p className="text-slate-500 text-xs">Total Mensual</p>
-                                   <p className="text-white font-bold">$ {financials.total.toLocaleString()}</p>
-                               </div>
-                           </div>
+          {view === 'history' && (
+             <div className="space-y-6 animate-in fade-in">
+                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl flex gap-4 overflow-x-auto">
+                     <select value={historyYear} onChange={e => setHistoryYear(Number(e.target.value))} className="bg-slate-950 border border-slate-700 text-white rounded px-3 py-2 text-sm outline-none">{[2023, 2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}</select>
+                     <select value={historyMonth} onChange={e => setHistoryMonth(Number(e.target.value))} className="bg-slate-950 border border-slate-700 text-white rounded px-3 py-2 text-sm outline-none">{['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'].map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
+                     <select value={historyEmployeeFilter} onChange={e => setHistoryEmployeeFilter(e.target.value)} className="bg-slate-950 border border-slate-700 text-white rounded px-3 py-2 text-sm outline-none"><option value="all">Todos</option>{employees.map(e => <option key={e.id} value={e.id}>{e.fullName}</option>)}</select>
+                 </div>
+                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                     <div className="bg-slate-900 p-4 rounded-xl border border-slate-800"><p className="text-xs text-slate-500 font-bold uppercase">Total Mes</p><h3 className="text-2xl font-bold text-emerald-400">{formatMoney(historyTotals.total).cop}</h3></div>
+                     <div className="bg-slate-900 p-4 rounded-xl border border-slate-800"><p className="text-xs text-slate-500 font-bold uppercase">Sueldos</p><h3 className="text-xl font-bold text-blue-400">{formatMoney(historyTotals.base).cop}</h3></div>
+                     <div className="bg-slate-900 p-4 rounded-xl border border-slate-800"><p className="text-xs text-slate-500 font-bold uppercase">Primas</p><h3 className="text-xl font-bold text-amber-400">{formatMoney(historyTotals.prima).cop}</h3></div>
+                     <div className="bg-slate-900 p-4 rounded-xl border border-slate-800"><p className="text-xs text-slate-500 font-bold uppercase">Bonos</p><h3 className="text-xl font-bold text-purple-400">{formatMoney(historyTotals.bonus).cop}</h3></div>
+                 </div>
+                 <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+                     <table className="w-full text-sm text-left text-slate-400">
+                         <thead className="bg-slate-950 text-xs uppercase font-bold text-slate-500"><tr><th className="px-6 py-4">Fecha</th><th className="px-6 py-4">Empleado</th><th className="px-6 py-4 text-right">Total</th><th className="px-6 py-4 text-center">Acciones</th></tr></thead>
+                         <tbody className="divide-y divide-slate-800">
+                             {filteredHistory.map((r) => (
+                                 <tr key={r.id} className="hover:bg-slate-800/50">
+                                     <td className="px-6 py-4">{new Date(r.date).toLocaleDateString()}</td>
+                                     <td className="px-6 py-4 font-bold text-white">{r.employeeName}</td>
+                                     <td className="px-6 py-4 text-right font-mono text-emerald-400 font-bold">{formatMoney(r.totalPaid).cop}</td>
+                                     <td className="px-6 py-4 text-center flex justify-center gap-2">
+                                         <button onClick={() => handleOpenHistoryPayslip(r)} className="text-purple-400 p-1.5 hover:bg-slate-800 rounded">📄</button>
+                                         <button onClick={() => handleEditPaymentRecord(r)} className="text-blue-400 p-1.5 hover:bg-slate-800 rounded">✎</button>
+                                         <button onClick={() => handleRequestDeleteRecord(r)} className="text-red-400 p-1.5 hover:bg-slate-800 rounded">✕</button>
+                                     </td>
+                                 </tr>
+                             ))}
+                         </tbody>
+                     </table>
+                 </div>
+             </div>
+          )}
+      </div>
 
-                           <div className="flex gap-2 w-full md:w-auto justify-end">
-                               {/* Active Toggle */}
-                               <button
-                                 onClick={() => handleToggleActive(emp)}
-                                 className={`p-2 rounded-lg transition-colors ${emp.active ? 'text-emerald-400 hover:bg-emerald-500/10' : 'text-slate-600 hover:text-slate-400 hover:bg-slate-800'}`}
-                                 title={emp.active ? "Desactivar" : "Activar"}
-                               >
-                                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                                      <path strokeLinecap="round" strokeLinejoin="round" d="M5.636 5.636a9 9 0 1012.728 0M12 3v9" />
-                                   </svg>
-                               </button>
+      {isPaymentModalOpen && activePaymentEmployee && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+              <div className="bg-slate-900 border border-slate-700 w-full max-w-lg rounded-2xl p-6 shadow-2xl">
+                  <h3 className="text-xl font-bold text-white mb-6">Procesar Pago: {activePaymentEmployee.fullName}</h3>
+                  <div className="space-y-4">
+                      <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 grid grid-cols-3 gap-2">
+                          <div><label className="text-[10px] uppercase font-bold text-blue-400">Sueldo</label><input type="number" value={paymentBreakdown.baseSalary} onChange={e=>setPaymentBreakdown({...paymentBreakdown, baseSalary: parseFloat(e.target.value)||0})} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-white text-xs"/></div>
+                          <div><label className="text-[10px] uppercase font-bold text-amber-400">Prima</label><input type="number" value={paymentBreakdown.christmasBonus} onChange={e=>setPaymentBreakdown({...paymentBreakdown, christmasBonus: parseFloat(e.target.value)||0})} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-white text-xs"/></div>
+                          <div><label className="text-[10px] uppercase font-bold text-purple-400">Bono</label><input type="number" value={paymentBreakdown.extraBonus} onChange={e=>setPaymentBreakdown({...paymentBreakdown, extraBonus: parseFloat(e.target.value)||0})} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-white text-xs"/></div>
+                      </div>
+                      <div>
+                          <label className="text-xs font-bold text-slate-400 mb-1 block">Billetera Origen</label>
+                          {paymentSources.map((s,i) => (
+                              <div key={i} className="flex gap-2 mb-2">
+                                  <select value={s.walletId} onChange={e=>handleSourceChange(i,'walletId',e.target.value)} className="flex-1 bg-slate-950 border border-slate-700 rounded p-2 text-white text-sm outline-none">{wallets.map(w => <option key={w.id} value={w.id}>{w.name} ({formatMoney(w.balance).cop})</option>)}</select>
+                                  <input type="number" value={s.amount} onChange={e=>handleSourceChange(i,'amount',parseFloat(e.target.value))} className="w-24 bg-slate-950 border border-slate-700 rounded p-2 text-white text-sm text-right"/>
+                              </div>
+                          ))}
+                          <button onClick={handleAddSource} className="text-xs text-blue-400">+ Fuente</button>
+                      </div>
+                      <div className="flex gap-2">
+                          <input type="date" value={paymentDate} onChange={e=>setPaymentDate(e.target.value)} className="bg-slate-950 border border-slate-700 rounded p-2 text-white text-sm"/>
+                          <input type="text" placeholder="Notas..." value={paymentNotes} onChange={e=>setPaymentNotes(e.target.value)} className="flex-1 bg-slate-950 border border-slate-700 rounded p-2 text-white text-sm"/>
+                      </div>
+                  </div>
+                  <div className="mt-6 flex justify-end gap-3">
+                      <button onClick={()=>setIsPaymentModalOpen(false)} className="px-4 py-2 text-slate-400 hover:text-white">Cancelar</button>
+                      <button onClick={handleProcessPayment} className="px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold">Confirmar Pago</button>
+                  </div>
+              </div>
+          </div>
+      )}
 
-                               <button 
-                                 onClick={() => handleOpenPayslip(emp)}
-                                 disabled={isInactive}
-                                 className="p-2 text-slate-400 hover:text-white bg-slate-800 rounded-lg transition-colors disabled:opacity-50" title="Generar Reporte"
-                               >
-                                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0l.229 2.523a1.125 1.125 0 01-1.12 1.227H7.231c-.662 0-1.198-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0021 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 00-1.913-.247M6.34 18H5.25A2.25 2.25 0 013 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 011.913-.247m10.5 0a48.536 48.536 0 00-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-1.125.504-1.125 1.125v3.659M18 10.5h.008v.008H18V10.5zm-3 0h.008v.008H15V10.5z" />
-                                  </svg>
-                               </button>
-                               <button 
-                                 onClick={() => { setEditingEmployee(emp); setEmployeeForm(emp); }}
-                                 className="p-2 text-blue-400 hover:text-white bg-slate-800 rounded-lg transition-colors"
-                               >
-                                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" />
-                                  </svg>
-                               </button>
-                               <button 
-                                 onClick={() => handleDeleteEmployee(emp.id)}
-                                 className="p-2 text-red-400 hover:text-white bg-slate-800 rounded-lg transition-colors"
-                               >
-                                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                                  </svg>
-                               </button>
-                           </div>
-                       </div>
-                   );
-               })}
-           </div>
+      {showPayslipModal && currentPayslip && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+            <div className="bg-white text-slate-900 w-full max-w-md rounded-xl shadow-2xl p-8 animate-in zoom-in-95">
+                <div className="text-center mb-6 pb-4 border-b border-gray-200">
+                    <h2 className="font-bold text-2xl uppercase tracking-wider">{currentPayslip.month}</h2>
+                    <p className="text-sm text-gray-500">Comprobante de Pago - CambioDigital</p>
+                </div>
+                <div className="space-y-4 mb-8">
+                    <div className="flex justify-between font-bold text-lg"><span>{currentPayslip.employee.fullName}</span><span>{currentPayslip.employee.role}</span></div>
+                    <div className="bg-gray-50 p-4 rounded-lg space-y-2 text-sm">
+                        <div className="flex justify-between"><span>Base</span><span className="font-mono">{formatMoney(currentPayslip.salaryDetails.base).cop}</span></div>
+                        <div className="flex justify-between text-blue-600"><span>Prima</span><span className="font-mono">{formatMoney(currentPayslip.salaryDetails.christmas).cop}</span></div>
+                        <div className="flex justify-between text-purple-600"><span>Bono</span><span className="font-mono">{formatMoney(currentPayslip.employee.bonus || 0).cop}</span></div>
+                        <div className="border-t border-gray-300 pt-2 mt-2 flex justify-between font-bold text-base text-black"><span>TOTAL</span><span>{formatMoney(currentPayslip.salaryDetails.total).cop}</span></div>
+                    </div>
+                </div>
+                <button onClick={() => setShowPayslipModal(false)} className="w-full py-3 bg-slate-900 text-white rounded-lg font-bold">Cerrar</button>
+            </div>
         </div>
       )}
 
-      {/* VIEW: HISTORY */}
-      {view === 'history' && (
-         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center animate-in fade-in">
-             <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8 text-slate-500">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-             </div>
-             <h3 className="text-xl font-bold text-white mb-2">Archivo Histórico</h3>
-             <p className="text-slate-500 max-w-md mx-auto">
-                 El sistema guarda automáticamente los pagos al generar los reportes mensuales. 
-                 Actualmente esta función está en modo visualización.
-             </p>
-         </div>
-      )}
-
-      {/* MODAL: CONFIGURATION */}
-      {isConfigModalOpen && tempConfig && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-              <div className="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-2xl p-6 flex flex-col max-h-[90vh]">
-                  <h3 className="text-xl font-bold text-white mb-6 shrink-0">Configuración Financiera Global</h3>
-                  
-                  <div className="space-y-6 overflow-y-auto custom-scrollbar flex-1 pr-2">
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                            <label className="text-xs text-slate-400 uppercase font-bold">Presupuesto Total ($)</label>
-                            <input 
-                                type="number" 
-                                className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white mt-1"
-                                value={tempConfig.totalBudget}
-                                onChange={(e) => setTempConfig({...tempConfig, totalBudget: parseFloat(e.target.value)})}
-                            />
-                        </div>
-                        <div>
-                            <label className="text-xs text-slate-400 uppercase font-bold">Salario Base ($)</label>
-                            <input 
-                                type="number" 
-                                className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 text-white mt-1"
-                                value={tempConfig.baseSalary}
-                                onChange={(e) => setTempConfig({...tempConfig, baseSalary: parseFloat(e.target.value)})}
-                            />
-                        </div>
-                      </div>
-
-                      {/* Dynamic Roles Editor */}
-                      <div>
-                          <div className="flex justify-between items-center mb-2">
-                              <label className="text-xs text-slate-400 uppercase font-bold">Cargos y Multiplicadores</label>
-                              <button onClick={handleAddRole} className="text-xs bg-slate-800 hover:bg-slate-700 text-blue-400 px-2 py-1 rounded">
-                                  + Agregar Cargo
-                              </button>
-                          </div>
-                          <div className="space-y-2 bg-slate-950 p-3 rounded border border-slate-800">
-                              {tempConfig.roles.map((role) => (
-                                  <div key={role.id} className="flex gap-2 items-center">
-                                      <input 
-                                        type="text" 
-                                        className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white flex-1"
-                                        value={role.name}
-                                        onChange={(e) => handleUpdateRole(role.id, 'name', e.target.value)}
-                                        placeholder="Nombre del cargo"
-                                      />
-                                      <div className="flex items-center gap-1 w-24">
-                                          <span className="text-slate-500 text-xs">x</span>
-                                          <input 
-                                            type="number" 
-                                            step="0.1"
-                                            className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-white w-full"
-                                            value={role.multiplier}
-                                            onChange={(e) => handleUpdateRole(role.id, 'multiplier', parseFloat(e.target.value))}
-                                          />
-                                      </div>
-                                      <button 
-                                        onClick={() => handleRemoveRole(role.id)}
-                                        className="text-slate-500 hover:text-red-400 p-1"
-                                        title="Eliminar Cargo"
-                                      >
-                                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                                          </svg>
-                                      </button>
-                                  </div>
-                              ))}
-                          </div>
-                          <p className="text-[10px] text-slate-500 mt-1">* El salario se calcula: Base x Multiplicador.</p>
-                      </div>
-                  </div>
-
-                  <div className="mt-6 flex justify-end gap-3 shrink-0">
-                      <button onClick={() => setIsConfigModalOpen(false)} className="px-4 py-2 text-slate-400 hover:text-white">Cancelar</button>
-                      <button onClick={() => handleSaveConfig()} className="px-6 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded font-bold">Guardar Cambios</button>
-                  </div>
-              </div>
-          </div>
-      )}
-
-      {/* MODAL: PAYSLIP GENERATOR */}
-      {showPayslipModal && currentPayslip && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-4 overflow-y-auto">
-              <div className="bg-white text-slate-900 w-full max-w-2xl rounded-sm shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-                  
-                  {/* PRINTABLE AREA */}
-                  <div className="p-8 md:p-12 overflow-y-auto" id="printable-payslip">
-                      <div className="flex justify-between items-start border-b-2 border-slate-900 pb-6 mb-8">
-                          <div>
-                              <h1 className="text-3xl font-serif font-bold tracking-tight text-slate-900">NOMINA EJECUTIVA</h1>
-                              <p className="text-slate-500 text-sm uppercase tracking-widest mt-1">Confidencial</p>
-                          </div>
-                          <div className="text-right">
-                              <p className="font-bold">{currentPayslip.month}</p>
-                              <p className="text-sm text-slate-500">ID: {currentPayslip.employee.id.substring(0,6)}</p>
-                          </div>
-                      </div>
-
-                      <div className="mb-8">
-                          <h3 className="text-lg font-bold mb-2">Detalles del Empleado</h3>
-                          <div className="grid grid-cols-2 gap-4 text-sm">
-                              <div><span className="text-slate-500">Nombre:</span> <span className="font-bold block text-lg">{currentPayslip.employee.fullName}</span></div>
-                              <div><span className="text-slate-500">Cargo:</span> <span className="font-bold block text-lg">{currentPayslip.employee.role}</span></div>
-                          </div>
-                      </div>
-
-                      <table className="w-full mb-8 text-sm">
-                          <thead>
-                              <tr className="border-b border-slate-300">
-                                  <th className="text-left py-2">Concepto</th>
-                                  <th className="text-right py-2">Monto</th>
-                              </tr>
-                          </thead>
-                          <tbody>
-                              <tr className="border-b border-slate-100">
-                                  <td className="py-3">Salario Base (Categoría {currentPayslip.employee.role})</td>
-                                  <td className="text-right py-3">$ {currentPayslip.salaryDetails.base.toLocaleString()}</td>
-                              </tr>
-                              <tr className="border-b border-slate-100">
-                                  <td className="py-3">Prima de Navidad (50%)</td>
-                                  <td className="text-right py-3">$ {currentPayslip.salaryDetails.christmas.toLocaleString()}</td>
-                              </tr>
-                              {currentPayslip.employee.bonus > 0 && (
-                                  <tr className="border-b border-slate-100">
-                                      <td className="py-3">Bonificación por Mérito</td>
-                                      <td className="text-right py-3">$ {currentPayslip.employee.bonus.toLocaleString()}</td>
-                                  </tr>
-                              )}
-                              <tr className="font-bold text-lg">
-                                  <td className="py-4">TOTAL A PAGAR</td>
-                                  <td className="text-right py-4">$ {currentPayslip.salaryDetails.total.toLocaleString()}</td>
-                              </tr>
-                          </tbody>
-                      </table>
-
-                      {/* EDITABLE FEEDBACK SECTION */}
-                      <div className="bg-slate-50 p-6 border border-slate-200 rounded mb-6 print:bg-transparent print:border-slate-300">
-                          <h4 className="font-bold text-amber-600 mb-4 uppercase text-xs tracking-wider">Feedback Ejecutivo</h4>
-                          
-                          <div className="space-y-4">
-                              <div>
-                                  <label className="block text-xs font-bold text-slate-400 mb-1 print:hidden">Mensaje Personal / Feedback</label>
-                                  <textarea 
-                                    className="w-full bg-transparent border-b border-slate-300 focus:border-amber-500 outline-none resize-none h-20 text-slate-700 print:border-none"
-                                    placeholder="Escribe un mensaje motivacional aquí..."
-                                    value={payslipForm.message}
-                                    onChange={e => setPayslipForm({...payslipForm, message: e.target.value})}
-                                  />
-                              </div>
-                              <div className="grid grid-cols-2 gap-6">
-                                  <div>
-                                      <label className="block text-xs font-bold text-slate-400 mb-1 print:hidden">Proyectos Pendientes</label>
-                                      <textarea 
-                                        className="w-full bg-transparent border-b border-slate-300 focus:border-amber-500 outline-none resize-none h-20 text-slate-700 text-sm print:border-none"
-                                        placeholder="- Tarea 1..."
-                                        value={payslipForm.tasks}
-                                        onChange={e => setPayslipForm({...payslipForm, tasks: e.target.value})}
-                                      />
-                                  </div>
-                                  <div>
-                                      <label className="block text-xs font-bold text-slate-400 mb-1 print:hidden">Metas Próximo Mes</label>
-                                      <textarea 
-                                        className="w-full bg-transparent border-b border-slate-300 focus:border-amber-500 outline-none resize-none h-20 text-slate-700 text-sm print:border-none"
-                                        placeholder="- Meta 1..."
-                                        value={payslipForm.goals}
-                                        onChange={e => setPayslipForm({...payslipForm, goals: e.target.value})}
-                                      />
-                                  </div>
-                              </div>
-                          </div>
-                      </div>
-
-                      <div className="text-center text-xs text-slate-400 mt-12 print:mt-20">
-                          <p>Documento generado electrónicamente por CambioDigital Executive Suite.</p>
-                      </div>
-                  </div>
-
-                  {/* ACTION BAR */}
-                  <div className="bg-slate-100 p-4 flex justify-end gap-3 border-t border-slate-200 print:hidden shrink-0">
-                      <button 
-                        onClick={() => setShowPayslipModal(false)}
-                        className="px-4 py-2 text-slate-600 hover:text-slate-900 font-medium"
-                      >
-                          Cerrar
-                      </button>
-                      <button 
-                        onClick={() => window.print()}
-                        className="px-6 py-2 bg-slate-900 text-white rounded font-bold hover:bg-slate-800 flex items-center gap-2"
-                      >
-                          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0l.229 2.523a1.125 1.125 0 01-1.12 1.227H7.231c-.662 0-1.198-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0021 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 00-1.913-.247M6.34 18H5.25A2.25 2.25 0 013 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 011.913-.247m10.5 0a48.536 48.536 0 00-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-1.125.504-1.125 1.125v3.659M18 10.5h.008v.008H18V10.5zm-3 0h.008v.008H15V10.5z" />
-                          </svg>
-                          Imprimir / Guardar PDF
-                      </button>
-                  </div>
-              </div>
-          </div>
-      )}
-
-      {/* CSS FOR PRINTING (Injected here for simplicity) */}
-      <style>{`
-        @media print {
-            body * {
-                visibility: hidden;
-            }
-            #printable-payslip, #printable-payslip * {
-                visibility: visible;
-            }
-            #printable-payslip {
-                position: fixed;
-                left: 0;
-                top: 0;
-                width: 100%;
-                height: 100%;
-                overflow: visible;
-                background: white;
-                color: black;
-                padding: 40px;
-            }
-            /* Hide scrollbars and UI elements */
-            ::-webkit-scrollbar { display: none; }
-        }
-      `}</style>
-
+      {config && <FinancialConfigModal isOpen={isConfigModalOpen} onClose={() => setIsConfigModalOpen(false)} config={config} onSave={handleSaveConfig} />}
     </div>
   );
 };

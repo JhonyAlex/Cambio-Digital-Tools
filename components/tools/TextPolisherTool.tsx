@@ -38,6 +38,31 @@ const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => {
   let inCodeBlock = false;
   let codeBlockBuffer: string[] = [];
 
+  const renderCodeBlock = (buffer: string[], keyIndex: string | number) => {
+      const textContent = buffer.join('\n');
+      return (
+          <div key={`code-${keyIndex}`} className="relative group/code my-4 bg-slate-950 border border-slate-700 rounded-lg overflow-hidden">
+            {/* Label / Button - Isolated from selection with select-none and absolute positioning */}
+            <div className="absolute top-2 right-2 opacity-0 group-hover/code:opacity-100 transition-opacity z-10 select-none">
+                <button
+                    onClick={() => navigator.clipboard.writeText(textContent)}
+                    className="text-[10px] text-slate-500 hover:text-emerald-400 hover:border-emerald-500/50 uppercase font-bold bg-slate-900 px-2 py-1 rounded border border-slate-700 transition-colors cursor-pointer flex items-center gap-1"
+                    title="Clic para copiar al portapapeles"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-3 h-3">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 01-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 011.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.876a9.06 9.06 0 00-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 01-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 00-3.375-3.375h-1.5" />
+                    </svg>
+                    Copiar WhatsApp
+                </button>
+            </div>
+            {/* Content Container - select-all applies ONLY to this div */}
+            <div className="p-4 font-mono text-sm text-emerald-400 whitespace-pre-wrap overflow-x-auto shadow-inner select-all">
+                {textContent}
+            </div>
+          </div>
+      );
+  };
+
   lines.forEach((line, i) => {
     const trimmed = line.trim();
 
@@ -45,14 +70,7 @@ const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => {
     if (trimmed.startsWith('```')) {
       if (inCodeBlock) {
         // End of block
-        renderedNodes.push(
-          <div key={`code-${i}`} className="bg-slate-950 border border-slate-700 rounded-lg p-4 font-mono text-sm text-emerald-400 whitespace-pre-wrap my-4 overflow-x-auto shadow-inner select-all relative group/code">
-            <div className="absolute top-2 right-2 opacity-0 group-hover/code:opacity-100 transition-opacity">
-                <span className="text-[10px] text-slate-500 uppercase font-bold bg-slate-900 px-2 py-1 rounded border border-slate-700">Copiar WhatsApp</span>
-            </div>
-            {codeBlockBuffer.join('\n')}
-          </div>
-        );
+        renderedNodes.push(renderCodeBlock(codeBlockBuffer, i));
         codeBlockBuffer = [];
         inCodeBlock = false;
       } else {
@@ -106,11 +124,7 @@ const MarkdownRenderer: React.FC<{ content: string }> = ({ content }) => {
 
   // Flush remaining code block if not closed (edge case)
   if (inCodeBlock && codeBlockBuffer.length > 0) {
-      renderedNodes.push(
-          <div key={`code-end`} className="bg-slate-950 border border-slate-700 rounded-lg p-4 font-mono text-sm text-emerald-400 whitespace-pre-wrap my-4">
-            {codeBlockBuffer.join('\n')}
-          </div>
-      );
+      renderedNodes.push(renderCodeBlock(codeBlockBuffer, 'end'));
   }
 
   return (
@@ -230,7 +244,7 @@ const TextPolisherTool: React.FC = () => {
                 <div>
                     <h1 className="text-2xl font-bold text-white flex items-center gap-2">
                         <span className="bg-fuchsia-600 p-1.5 rounded-lg">✨</span>
-                        {t.polisherTitle}
+                        Redactor Pro
                     </h1>
                     <p className="text-slate-400 text-sm hidden md:block">{t.polisherDesc}</p>
                 </div>

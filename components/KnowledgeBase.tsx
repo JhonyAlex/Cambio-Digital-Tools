@@ -156,57 +156,91 @@ const KnowledgeBase: React.FC<Props> = ({ initialProject, apiConfig, onBack }) =
       handleNewFiles([audioFile]);
   };
 
+  const handleRetryFailed = () => {
+      setProject(prev => ({
+          ...prev,
+          files: prev.files.map(f => f.status === 'error' ? { ...f, status: 'pending', errorMsg: undefined } : f)
+      }));
+  };
+
   useEffect(() => {
     const processQueue = async () => {
       const pendingFiles = project.files.filter(f => f.status === 'pending');
-      if (pendingFiles.length === 0 && processingQueueRef.current.length === 0) { setIsProcessing(false); return; }
+      
+      // If nothing pending, stop processing flag
+      if (pendingFiles.length === 0) { 
+          // If queue is empty but active count > 0, we are finishing up.
+          if (processingQueueRef.current.length === 0) {
+              setIsProcessing(false); 
+          }
+          return; 
+      }
+      
       setIsProcessing(true);
       const activeCount = processingQueueRef.current.length;
       const slotsAvailable = CONCURRENT_LIMIT - activeCount;
+      
       if (slotsAvailable <= 0) return;
       
       const nextBatch = pendingFiles.slice(0, slotsAvailable);
       if (nextBatch.length === 0) return;
       
       const batchIds = nextBatch.map(f => f.id);
-      processingQueueRef.current = [...processingQueueRef.current, ...batchIds];
       
-      // Update status to processing immediately
+      // Mark as processing visually
       setProject(prev => ({ ...prev, files: prev.files.map(f => batchIds.includes(f.id) ? { ...f, status: 'processing' } : f) }));
       
+      // Add to Ref Queue immediately
+      processingQueueRef.current = [...processingQueueRef.current, ...batchIds];
+      
       nextBatch.forEach(async (fileObj) => {
-        if (!fileObj.file) { processingQueueRef.current = processingQueueRef.current.filter(id => id !== fileObj.id); return; }
-        
         try {
+          // Hydrate file if it's missing (rare, usually happens on reload)
           let fileToProcess = fileObj.file;
-          const ext = fileObj.name.split('.').pop()?.toLowerCase();
           
-          // --- AUTO-CONVERSION FOR WHATSAPP/OGG ---
-          // Gemini API has issues with some raw OGG/Opus containers from WhatsApp.
-          // We convert them to WAV (Linear PCM) on the client side before uploading.
-          if (fileToProcess && (ext === 'ogg' || ext === 'opus' || fileToProcess.type.includes('ogg') || fileToProcess.type.includes('opus'))) {
+          if (!fileToProcess) {
+              // Try to load from blob store if not in memory
               try {
-                  // This decoding happens in the browser
-                  fileToProcess = await convertAudioToWav(fileToProcess);
-              } catch (conversionError) {
-                  console.error("Audio conversion failed, trying raw upload...", conversionError);
-                  // If conversion fails, we try sending original file, though it might fail with 400.
+                  const blob = await localBlobService.getFile(fileObj.id);
+                  if (blob) {
+                      fileToProcess = new File([blob], fileObj.name, { type: blob.type });
+                  } else {
+                      throw new Error("File content not found (Blob missing)");
+                  }
+              } catch (e) {
+                  throw new Error("Could not restore file for processing");
               }
           }
 
-          // Save the (possibly converted) file to local storage for playback/persistence
+          const ext = fileObj.name.split('.').pop()?.toLowerCase();
+          
+          // --- AUTO-CONVERSION FOR WHATSAPP/OGG ---
+          if (fileToProcess && (ext === 'ogg' || ext === 'opus' || fileToProcess.type.includes('ogg') || fileToProcess.type.includes('opus'))) {
+              try {
+                  fileToProcess = await convertAudioToWav(fileToProcess);
+              } catch (conversionError) {
+                  console.warn("Audio conversion failed, trying raw upload...", conversionError);
+              }
+          }
+
+          // Save cleaned file to local storage
           await localBlobService.saveFile(fileObj.id, fileToProcess);
           
+          // API CALL (Retry logic is now in geminiService)
           const result = await processMultimodalContent(fileToProcess, apiConfig);
+          
           setProject(prev => ({ ...prev, files: prev.files.map(f => f.id === fileObj.id ? { ...f, status: 'completed', transcript: result.text, summary: result.summary, file: undefined } : f) }));
-        } catch (error) {
-           setProject(prev => ({ ...prev, files: prev.files.map(f => f.id === fileObj.id ? { ...f, status: 'error', errorMsg: (error as Error).message, file: undefined } : f) }));
+        } catch (error: any) {
+           console.error("Processing error for file " + fileObj.id, error);
+           setProject(prev => ({ ...prev, files: prev.files.map(f => f.id === fileObj.id ? { ...f, status: 'error', errorMsg: error.message, file: undefined } : f) }));
         } finally { 
+            // Release slot
             processingQueueRef.current = processingQueueRef.current.filter(id => id !== fileObj.id); 
         }
       });
     };
-    const interval = setInterval(processQueue, 1000);
+    
+    const interval = setInterval(processQueue, 2000); // Check queue every 2s
     return () => clearInterval(interval);
   }, [project.files, apiConfig]);
 
@@ -220,6 +254,8 @@ const KnowledgeBase: React.FC<Props> = ({ initialProject, apiConfig, onBack }) =
   const groups: TimelineGroup[] = useMemo(() => groupFilesByDate(filteredFiles, dateOrder, seqOrder), [filteredFiles, dateOrder, seqOrder]);
   const completedCount = useMemo(() => project.files.filter(f => f.status === 'completed').length, [project.files]);
   const pendingCount = useMemo(() => project.files.filter(f => f.status === 'pending' || f.status === 'processing').length, [project.files]);
+  const errorCount = useMemo(() => project.files.filter(f => f.status === 'error').length, [project.files]);
+  
   const activeSessionName = activeSessionId === 'all' ? t.all : activeSessionId === 'unassigned' ? t.inbox : project.sessions?.find(s => s.id === activeSessionId)?.name || 'Session';
 
   const handleOpenSummaryGenerator = () => { if (completedCount === 0) return; setShowSummaryModal(true); };
@@ -277,6 +313,15 @@ const KnowledgeBase: React.FC<Props> = ({ initialProject, apiConfig, onBack }) =
             <div><div className="flex items-center gap-2 text-xs text-slate-500 mb-1"><span className="truncate max-w-[100px]">{project.name}</span><span>/</span><span className="text-blue-400">{activeSessionName}</span></div><h2 className="text-xl font-bold text-white truncate max-w-xs">{activeSessionName}</h2></div>
             <div className="flex items-center gap-3">
                 {pendingCount > 0 && (<div className="hidden md:flex flex-col w-40 mr-4"><div className="flex justify-between text-[10px] text-blue-300 mb-1 font-bold uppercase"><span>Procesando...</span><span>{pendingCount} pendientes</span></div><div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden"><div className="h-full bg-blue-500 animate-pulse rounded-full w-full opacity-50"></div></div></div>)}
+                {errorCount > 0 && (
+                    <button 
+                        onClick={handleRetryFailed} 
+                        className="bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-500/30 px-3 py-2 rounded-lg text-xs font-bold animate-pulse hover:animate-none flex items-center gap-2"
+                    >
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
+                        Reintentar ({errorCount})
+                    </button>
+                )}
                 <button onClick={() => setShowChat(!showChat)} className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${showChat ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>{t.chat}</button><button onClick={() => { setShowAddModal(true); setAddMode('file'); }} className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-lg" title={t.addAudios}><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" /></svg></button>
             </div>
         </div>
@@ -302,22 +347,101 @@ const KnowledgeBase: React.FC<Props> = ({ initialProject, apiConfig, onBack }) =
       </div>
 
       {/* CHAT PANEL */}
-      <div className={`fixed inset-y-0 right-0 w-full md:w-96 bg-slate-900 border-l border-slate-800 shadow-2xl transform transition-transform duration-300 z-50 flex flex-col ${showChat ? 'translate-x-0' : 'translate-x-full'}`}>
-        <div className="px-4 py-4 border-b border-slate-800 flex items-center justify-between bg-slate-900"><h3 className="font-bold text-white flex items-center gap-2">{t.chatContext}</h3><button onClick={() => setShowChat(false)} className="text-slate-400 hover:text-white">✕</button></div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar bg-[#0b1120]">{project.chatHistory.map(msg => (<div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700'}`}>{msg.text}</div></div>))}{isChatting && (<div className="flex justify-start"><div className="bg-slate-800 px-4 py-3 border border-slate-700 rounded-2xl rounded-bl-none"><span className="animate-pulse">...</span></div></div>)}<div ref={chatEndRef} /></div>
-        <div className="p-4 bg-slate-900 border-t border-slate-800"><div className="relative"><textarea value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if(e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(); } }} placeholder={`${t.chatPlaceholder} ${activeSessionName}...`} className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl pl-4 pr-12 py-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none h-12 max-h-32" /><button onClick={handleSendMessage} disabled={!chatInput.trim() || isChatting} className="absolute right-2 top-2 p-1.5 bg-indigo-600 rounded-lg text-white hover:bg-indigo-500 disabled:opacity-50 transition-colors">➔</button></div></div>
+      <div className={`fixed inset-y-0 right-0 w-full md:w-96 bg-slate-900 border-l border-slate-800 transform transition-transform duration-300 flex flex-col z-30 ${showChat ? 'translate-x-0 shadow-2xl' : 'translate-x-full'}`}>
+          <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900">
+              <h3 className="font-bold text-white flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 text-indigo-400">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" />
+                  </svg>
+                  {t.chatContext}
+              </h3>
+              <button onClick={() => setShowChat(false)} className="text-slate-400 hover:text-white">✕</button>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4 bg-[#0b1120]">
+              {project.chatHistory.length === 0 ? (
+                  <div className="text-center py-10 text-slate-500 text-sm">
+                      <p>{t.prompt_chat_system}</p>
+                      <p className="mt-2 text-xs text-slate-600">Pregunta sobre tus audios...</p>
+                  </div>
+              ) : (
+                  project.chatHistory.map(msg => (
+                      <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          <div className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-slate-800 text-slate-200 border border-slate-700 rounded-bl-none'}`}>
+                              <SimpleMarkdownRenderer content={msg.text} />
+                          </div>
+                      </div>
+                  ))
+              )}
+              {isChatting && (
+                  <div className="flex justify-start">
+                      <div className="bg-slate-800 border border-slate-700 rounded-2xl rounded-bl-none px-4 py-3 text-sm text-slate-400">
+                          <div className="flex gap-1">
+                              <span className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce"></span>
+                              <span className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce delay-75"></span>
+                              <span className="w-1.5 h-1.5 bg-slate-500 rounded-full animate-bounce delay-150"></span>
+                          </div>
+                      </div>
+                  </div>
+              )}
+              <div ref={chatEndRef} />
+          </div>
+
+          <div className="p-4 border-t border-slate-800 bg-slate-900">
+              <div className="relative">
+                  <textarea 
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSendMessage();
+                          }
+                      }}
+                      placeholder={t.chatPlaceholder}
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl py-3 pl-4 pr-12 text-sm text-white focus:border-indigo-500 outline-none resize-none h-12 max-h-32"
+                  />
+                  <button 
+                      onClick={handleSendMessage}
+                      disabled={!chatInput.trim() || isChatting}
+                      className="absolute right-2 top-2 p-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg disabled:opacity-50 disabled:bg-slate-700 transition-colors"
+                  >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                          <path d="M3.105 2.289a.75.75 0 00-.826.95l1.414 4.925A1.5 1.5 0 005.135 9.25h6.115a.75.75 0 010 1.5H5.135a1.5 1.5 0 00-1.442 1.086l-1.414 4.926a.75.75 0 00.826.95 28.896 28.896 0 0015.293-7.154.75.75 0 000-1.115A28.897 28.897 0 003.105 2.289z" />
+                      </svg>
+                  </button>
+              </div>
+          </div>
       </div>
 
+      {/* MODALS */}
       {showAddModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
-            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl overflow-hidden animate-in fade-in zoom-in-95 flex flex-col max-h-[80vh]">
-                <div className="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900 shrink-0"><h3 className="font-bold text-white">{t.addAudios}: {activeSessionName}</h3><button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-white">✕</button></div>
-                <div className="flex border-b border-slate-800"><button onClick={() => setAddMode('file')} className={`flex-1 py-3 text-sm font-medium transition-colors ${addMode === 'file' ? 'bg-slate-800 text-white border-b-2 border-blue-500' : 'text-slate-400 hover:text-slate-200'}`}>{t.uploadTab}</button><button onClick={() => setAddMode('text')} className={`flex-1 py-3 text-sm font-medium transition-colors ${addMode === 'text' ? 'bg-slate-800 text-white border-b-2 border-blue-500' : 'text-slate-400 hover:text-slate-200'}`}>{t.textTab}</button></div>
-                <div className="p-8 overflow-y-auto">{addMode === 'file' ? (<><Dropzone onFilesAdded={(files) => { const targetSession = (activeSessionId !== 'all' && activeSessionId !== 'unassigned') ? activeSessionId : undefined; const processed = files.map(f => ({ ...f, id: crypto.randomUUID(), sequence: extractSequenceFromFilename(f.name), date: extractDateFromFilename(f.name), sessionId: targetSession })); handleNewFiles(processed); }} t={t} /><p className="text-xs text-slate-500 mt-4 text-center">Sistema inteligente de detección de duplicados activo.</p></>) : (<div className="space-y-4"><input type="text" placeholder={t.textTitlePlaceholder} value={textTitle} onChange={(e) => setTextTitle(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-white outline-none focus:border-blue-500" /><textarea placeholder={t.pastePlaceholder} value={textInput} onChange={(e) => setTextInput(e.target.value)} className="w-full h-48 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-white outline-none focus:border-blue-500 resize-none font-mono text-sm"></textarea><div className="flex justify-end"><button onClick={handleTextSubmission} className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg font-bold shadow-lg transition-all">{t.processText}</button></div></div>)}</div>
-            </div>
-        </div>
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+              <div className="bg-slate-900 border border-slate-700 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95">
+                  <div className="flex border-b border-slate-700">
+                      <button onClick={() => setAddMode('file')} className={`flex-1 py-3 text-sm font-medium ${addMode === 'file' ? 'bg-slate-800 text-white border-b-2 border-blue-500' : 'text-slate-400 hover:text-white'}`}>{t.uploadTab}</button>
+                      <button onClick={() => setAddMode('text')} className={`flex-1 py-3 text-sm font-medium ${addMode === 'text' ? 'bg-slate-800 text-white border-b-2 border-blue-500' : 'text-slate-400 hover:text-white'}`}>{t.textTab}</button>
+                  </div>
+                  <div className="p-6">
+                      {addMode === 'file' ? (
+                          <Dropzone onFilesAdded={handleNewFiles} t={t} />
+                      ) : (
+                          <div className="space-y-4">
+                              <input type="text" placeholder={t.textTitlePlaceholder} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-blue-500" value={textTitle} onChange={e => setTextTitle(e.target.value)} />
+                              <textarea placeholder={t.pastePlaceholder} className="w-full h-40 bg-slate-950 border border-slate-700 rounded-lg px-4 py-3 text-white outline-none focus:border-blue-500 resize-none text-sm" value={textInput} onChange={e => setTextInput(e.target.value)} />
+                              <button onClick={handleTextSubmission} className="w-full bg-blue-600 hover:bg-blue-500 text-white py-2 rounded-lg font-bold transition-colors">{t.processText}</button>
+                          </div>
+                      )}
+                  </div>
+                  <div className="p-4 bg-slate-800 flex justify-end">
+                      <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-white text-sm">Cancelar</button>
+                  </div>
+              </div>
+          </div>
       )}
+
       <SummaryGeneratorModal isOpen={showSummaryModal} onClose={() => setShowSummaryModal(false)} files={project.files} sessions={project.sessions} activeSessionId={activeSessionId} onGenerate={handleGenerateSummary} isGenerating={isGeneratingSummary} t={t} />
+
     </div>
   );
 };

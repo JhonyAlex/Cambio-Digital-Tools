@@ -11,17 +11,70 @@ const getApiKey = (config: ApiConfig): string => {
     throw new Error(`Falta la API Key para ${config.provider === 'gemini' ? 'Google Gemini' : 'OpenAI/Compatible'}. Por favor configúrala en Ajustes (⚙️).`);
 };
 
-// --- DYNAMIC IMPORT HELPER ---
-// Ensures the app loads even if the SDK fails to download initially
+// --- DYNAMIC IMPORT HELPER (SINGLETON PATTERN) ---
+// Ensures we only fetch the module once to prevent context issues during large batch processing
+let sdkPromise: Promise<any> | null = null;
+
 const loadGeminiSDK = async () => {
-    try {
+    if (!sdkPromise) {
         // @ts-ignore
-        const module = await import("@google/genai");
-        return module;
-    } catch (e) {
-        console.error("Failed to load Google GenAI SDK", e);
-        throw new Error("No se pudo cargar la librería de IA. Verifica tu conexión a internet.");
+        sdkPromise = import("@google/genai").catch(e => {
+            sdkPromise = null; // Reset on failure so we can try again
+            console.error("Failed to load Google GenAI SDK", e);
+            throw new Error("No se pudo cargar la librería de IA. Verifica tu conexión a internet.");
+        });
     }
+    return sdkPromise;
+};
+
+// --- RETRY LOGIC WITH EXPONENTIAL BACKOFF ---
+// Crucial for processing 100+ files where rate limits (429) or transient network errors occur.
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, baseDelay = 2000): Promise<T> {
+    try {
+        return await operation();
+    } catch (error: any) {
+        const msg = error.message || JSON.stringify(error);
+        
+        // Critical errors that should NOT be retried
+        if (msg.includes("API_KEY") || msg.includes("PERMISSION_DENIED") || msg.includes("400") || msg.includes("403")) {
+            throw error;
+        }
+
+        if (retries <= 0) {
+            if (msg.includes("Extension context invalidated")) {
+                throw new Error("El navegador interrumpió la conexión. Por favor recarga la página (F5) e intenta de nuevo.");
+            }
+            throw error;
+        }
+
+        // Retry on 429 (Rate Limit), 5xx (Server Error), or Network Glitches
+        console.warn(`Retrying operation... Attempts left: ${retries}. Waiting ${baseDelay}ms. Error: ${msg}`);
+        await new Promise(resolve => setTimeout(resolve, baseDelay));
+        
+        // Exponential backoff: 2s -> 4s -> 8s
+        return executeWithRetry(operation, retries - 1, baseDelay * 2);
+    }
+}
+
+// Helper to sanitize Gemini Errors
+const handleGeminiError = (e: any, context: string) => {
+    console.error(`Gemini Error (${context}):`, e);
+    const msg = e.message || JSON.stringify(e);
+
+    if (msg.includes("SERVICE_DISABLED") || msg.includes("Generative Language API has not been used")) {
+        const projectIdMatch = msg.match(/project (\d+)/);
+        const pid = projectIdMatch ? projectIdMatch[1] : "tu-proyecto";
+        const url = `https://console.developers.google.com/apis/api/generativelanguage.googleapis.com/overview?project=${pid}`;
+        throw new Error(`⚠️ API DESHABILITADA (PROYECTO ${pid}):\n\nDebes habilitar la 'Generative Language API' en tu consola de Google Cloud.\n\nEnlace: ${url}`);
+    }
+
+    if (msg.includes("400")) throw new Error("Error 400: Solicitud inválida. Verifica el formato del archivo.");
+    if (msg.includes("403")) throw new Error("Error 403: Acceso denegado. Verifica tu API Key.");
+    if (msg.includes("404") || msg.includes("not found")) throw new Error("Modelo no encontrado. Revisa Ajustes.");
+    if (msg.includes("Extension context invalidated")) throw new Error("Error de navegador: Recarga la página.");
+    if (msg.includes("429")) throw new Error("Límite de cuota excedido (429). Intenta más tarde.");
+    
+    throw new Error(`${context}: ${msg.substring(0, 200)}...`);
 };
 
 // --- TEST CONNECTION FUNCTION ---
@@ -31,22 +84,21 @@ export const testApiConnection = async (config: ApiConfig): Promise<string> => {
 
     try {
       const { GoogleGenAI } = await loadGeminiSDK();
-      const ai = new GoogleGenAI({ apiKey });
       
-      let model = config.models.fast || 'gemini-flash-latest';
-      if (model === 'gemini-2.5-flash-latest') model = 'gemini-flash-latest';
+      return await executeWithRetry(async () => {
+          const ai = new GoogleGenAI({ apiKey });
+          let model = config.models.fast || 'gemini-flash-latest';
+          if (model === 'gemini-2.5-flash-latest') model = 'gemini-flash-latest';
 
-      await ai.models.generateContent({
-        model: model,
-        contents: { parts: [{ text: 'Ping' }] },
+          await ai.models.generateContent({
+            model: model,
+            contents: { parts: [{ text: 'Ping' }] },
+          });
+          return `Google Gemini OK (${model})`;
       });
-      return `Google Gemini OK (${model})`;
     } catch (e: any) {
-      const msg = e.message || JSON.stringify(e);
-      if (msg.includes("API_KEY_INVALID") || msg.includes("400")) {
-          throw new Error("API Key inválida. Verifica que has copiado la clave correctamente en Ajustes.");
-      }
-      throw new Error(`Gemini Error: ${msg}`);
+      handleGeminiError(e, "Test Connection");
+      return "Error"; 
     }
   } else {
     // OpenAI Connection Check
@@ -86,231 +138,138 @@ export const processMultimodalContent = async (file: File, config: ApiConfig): P
       const apiKey = getApiKey(config); 
       const type = detectFileType(file);
       if (type === 'audio') return transcribeWithOpenAI(file, apiKey, config);
-      throw new Error("OpenAI implementation only supports Audio in this version. Use Gemini for Multimodal.");
+      throw new Error("OpenAI only supports Audio in this version.");
   }
 
   const apiKey = getApiKey(config);
   const { GoogleGenAI } = await loadGeminiSDK();
-  const ai = new GoogleGenAI({ apiKey });
+  
   const fileType = detectFileType(file);
-
   let parts: any[] = [];
   let prompt = "";
 
+  // Prepare parts (Heavy operation, do once outside retry if possible)
   if (fileType === 'text') {
       const textContent = await readFileAsText(file);
       parts = [{ text: textContent }];
-      prompt = `
-        Analiza el texto proporcionado.
-        1. "transcription": Devuelve el contenido principal limpio y formateado.
-        2. "summary": Genera un resumen de UNA sola frase que capture la esencia.
-      `;
+      prompt = `Analiza el texto. 1. "transcription": Contenido limpio. 2. "summary": Resumen de UNA frase.`;
   } else {
       const mediaPart = await fileToGenerativePart(file);
       parts = [mediaPart];
       
       if (fileType === 'audio') {
-          prompt = `
-            Actúa como un transcriptor experto en español.
-            Transcribe la siguiente nota de voz. Usa el contexto para corregir errores fonéticos. Mantén el mensaje original.
-            Genera un resumen de UNA sola frase que capture la esencia.
-          `;
+          prompt = `Actúa como transcriptor experto. Transcribe la nota de voz completa. Resume en una frase el tema principal.`;
       } else if (fileType === 'image') {
-          prompt = `
-            Actúa como experto en Visión por Computador.
-            1. "transcription": Realiza OCR (Reconocimiento Óptico de Caracteres). Extrae TODO el texto visible. Si no hay texto, describe el contenido visual en alto detalle.
-            2. "summary": Resume el contenido visual o el significado del texto en una frase.
-          `;
+          prompt = `Actúa como experto en Visión. OCR completo y descripción detallada. Resume en una frase.`;
       } else if (fileType === 'document') {
-           prompt = `
-            Actúa como Analista de Documentos.
-            1. "transcription": Extrae el texto clave de este documento. Mantén la estructura donde sea posible.
-            2. "summary": Genera un resumen de UNA sola frase que capture la esencia.
-          `;
+           prompt = `Actúa como Analista de Documentos. Extrae texto clave. Resume en una frase.`;
       }
   }
 
-  prompt += `
-    Output JSON schema:
-    {
-      "transcription": "The main content/text...",
-      "summary": "The summary..."
-    }
-  `;
-
+  prompt += ` Output JSON schema: { "transcription": "Content...", "summary": "Summary..." }`;
   parts.push({ text: prompt });
 
-  try {
-    let model = fileType === 'audio' 
-        ? (config.models.fast || 'gemini-flash-latest') 
-        : (config.models.complex || 'gemini-3-pro-preview');
-    
-    if (model === 'gemini-2.5-flash-latest') model = 'gemini-flash-latest';
+  return executeWithRetry(async () => {
+      const ai = new GoogleGenAI({ apiKey });
+      let model = fileType === 'audio' 
+          ? (config.models.fast || 'gemini-flash-latest') 
+          : (config.models.complex || 'gemini-3-pro-preview');
+      
+      if (model === 'gemini-2.5-flash-latest') model = 'gemini-flash-latest';
 
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: { parts: parts },
-      config: {
-        responseMimeType: "application/json"
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: { parts: parts },
+        config: { responseMimeType: "application/json" }
+      });
+
+      const responseText = response.text;
+      if (!responseText) throw new Error("Empty response from Gemini.");
+
+      try {
+        const json = JSON.parse(responseText);
+        return {
+          text: json.transcription || "Content extraction failed.",
+          summary: json.summary || "No summary."
+        };
+      } catch (e) {
+        console.warn("Gemini JSON parse error, returning raw text", e);
+        // Fallback for when JSON mode fails slightly but text is there
+        return { text: responseText, summary: "Resumen automático no disponible (Formato)" };
       }
-    });
-
-    const responseText = response.text;
-    if (!responseText) throw new Error("Empty response from Gemini.");
-
-    try {
-      const json = JSON.parse(responseText);
-      return {
-        text: json.transcription || "Content extraction failed.",
-        summary: json.summary || "No summary."
-      };
-    } catch (e) {
-      console.warn("Gemini JSON parse error", e);
-      return { text: responseText, summary: "Summary error (Format)" };
-    }
-  } catch (e: any) {
-    console.error("Gemini API Error:", e);
-    const msg = e.message || JSON.stringify(e);
-    if (msg.includes("400")) throw new Error("Error 400: Archivo demasiado grande o formato no soportado. Usa MP3/M4A/WAV.");
-    if (msg.includes("API_KEY")) throw new Error("Error de API Key: Verifica tu configuración en Ajustes.");
-    if (msg.includes("404") || msg.includes("not found")) throw new Error("Modelo no encontrado. Se ha corregido la configuración, intenta de nuevo.");
-    throw new Error(`Gemini Error: ${msg}`);
-  }
+  }).catch(e => {
+      if (e.message.includes("400") && fileType === 'audio') {
+          throw new Error("⚠️ Audio incompatible. Convierte a MP3/WAV.");
+      }
+      handleGeminiError(e, "Multimodal Processing");
+      return { text: "", summary: "" };
+  });
 };
 
 // --- TEXT POLISHER ---
 export const polishTextContent = async (textInput: string, files: File[], config: ApiConfig): Promise<string> => {
     const apiKey = getApiKey(config);
     const { GoogleGenAI } = await loadGeminiSDK();
-    const ai = new GoogleGenAI({ apiKey });
     
     const systemPrompt = `
-**Rol principal:**
-Eres un redactor experto y meticuloso. Tu trabajo es recibir un borrador (texto o archivo) y generar múltiples versiones mejoradas, **manteniendo una fidelidad absoluta al mensaje original**.
-
-## **Reglas de Oro (NO ROMPER):**
-1. **Fidelidad:** No inventes hechos, cifras ni nombres. No asumas información que no está en el input.
-2. **Ortografía y Gramática:** Impecables en todas las versiones.
-3. **Estructura:** Sigue el formato solicitado abajo.
-
-## **Formato de Respuesta Requerido:**
-
-### A. Versión WhatsApp
-- **IMPORTANTE:** El contenido de esta versión DEBE estar dentro de un bloque de código markdown (\`\`\`).
-- Formato interno: Usa *asterisco simple* para negritas.
-- Estilo: Cercano, uso de emojis moderado.
-
-### B. Versión Correo Electrónico
-- **Formato:** Markdown estándar (NO bloques de código).
-- Usa **doble asterisco** para negritas (Ej: **Asunto:**).
-- Estructura:
-  - **Asunto:** [Asunto Propuesto]
-  - [Cuerpo del correo con párrafos bien separados]
-
-### C. Versión Chat Rápido (Slack/Teams)
-- Directo, sin saludos formales.
-- Usa listas con guiones (-).
-
-### D. Versión Documento/Formal (Opcional)
-- Redacción impersonal en tercera persona.
-- Párrafos claros.
-
-Si recibes archivos, extrae su contenido y úsalo como base.
-    `;
+**Rol:** Redactor experto. Genera versiones mejoradas manteniendo fidelidad absoluta.
+**Formatos:**
+1. WhatsApp (con markdown de bloque de código)
+2. Email (Estructurado)
+3. Chat Rápido (Lista)
+`;
 
     const parts: any[] = [];
-
     for (const file of files) {
         const part = await fileToGenerativePart(file);
         parts.push(part);
     }
+    if (textInput.trim()) parts.push({ text: textInput });
+    else if (files.length === 0) throw new Error("Falta contenido.");
 
-    if (textInput.trim()) {
-        parts.push({ text: textInput });
-    } else if (files.length === 0) {
-        throw new Error("Debes proporcionar texto o archivos.");
-    }
-
-    try {
+    return executeWithRetry(async () => {
+        const ai = new GoogleGenAI({ apiKey });
         const hasHeavyMedia = files.some(f => detectFileType(f) === 'audio');
-        let model = hasHeavyMedia 
-            ? (config.models.fast || 'gemini-flash-latest') 
-            : (config.models.complex || 'gemini-3-pro-preview');
-        
+        let model = hasHeavyMedia ? (config.models.fast || 'gemini-flash-latest') : (config.models.complex || 'gemini-3-pro-preview');
         if (model === 'gemini-2.5-flash-latest') model = 'gemini-flash-latest';
 
         const response = await ai.models.generateContent({
             model: model,
             contents: { parts: parts },
-            config: {
-                systemInstruction: systemPrompt
-            }
+            config: { systemInstruction: systemPrompt }
         });
         
-        return response.text || "No se pudo generar una respuesta.";
-    } catch (e: any) {
-        console.error("Polisher Error:", e);
-        const msg = e.message || "";
-        if (msg.includes("API_KEY")) throw new Error("API Key inválida. Verifica tu configuración.");
-        throw new Error(`Error generando mejoras: ${msg}`);
-    }
+        return response.text || "Sin respuesta.";
+    }).catch(e => {
+        handleGeminiError(e, "Text Polisher");
+        return "";
+    });
 };
 
 // --- MEETING ANALYSIS ---
 export const analyzeMeetingTranscript = async (transcript: string, config: ApiConfig): Promise<Omit<MeetingAnalysis, 'id' | 'userId' | 'createdAt'>> => {
     const apiKey = getApiKey(config);
     const { GoogleGenAI } = await loadGeminiSDK();
-    const ai = new GoogleGenAI({ apiKey });
 
     const prompt = `
-        Actúa como un Analista de Reuniones Senior con IA.
-        Tu tarea es procesar la siguiente transcripción de una reunión y extraer conocimiento estructurado.
+        Actúa como Analista de Reuniones Senior.
+        TRANSCRIPCIÓN: """${transcript.substring(0, 50000)}"""
         
-        TRANSCRIPCIÓN:
-        """
-        ${transcript.substring(0, 50000)} 
-        """
-        (Si la transcripción se corta, analiza lo que hay disponible).
+        Extrae:
+        1. Meta (título, fecha, CLIENTE/PROYECTO).
+        2. Resumen ejecutivo.
+        3. Capítulos.
+        4. Preguntas clave.
+        5. TAREAS (Responsable, estado, deadline).
+        6. Métricas (sentimiento, calidad).
 
-        REQUISITOS OBLIGATORIOS:
-        1. **Meta:** Deduce el título, tipo de reunión, equipo probable, fecha (si se menciona, sino pon la fecha de hoy).
-        2. **CLIENTE (CRÍTICO):** Intenta identificar para qué **Cliente, Empresa Externa o Proyecto** fue esta reunión. Si es una reunión interna, pon "Interno". Si mencionan un nombre de empresa repetidamente, úsalo.
-        3. **Resumen:** Crea un resumen ejecutivo claro, lista de decisiones tomadas y problemas mencionados.
-        4. **Capítulos:** Divide la reunión en temas lógicos. Intenta inferir timestamps si el texto los tiene (ej: [00:10]), si no, usa null.
-        5. **Preguntas Clave:** Identifica preguntas importantes hechas y su respuesta (o "Sin respuesta").
-        6. **Tareas (CRÍTICO):** Detecta acciones. Asigna tipo (operativa, técnica, etc), estado (pending), responsable (si se menciona) y fecha límite (si se infiere).
-        7. **Métricas:** Calcula un sentimiento general (positive, neutral, negative), puntuación de participación (0-100) y calidad de la comunicación (0-100).
-
-        FORMATO JSON EXACTO:
-        {
-            "meta": { "title": "string", "type": "string", "team": "string", "date": "YYYY-MM-DD", "client": "string (e.g. 'Cliente X' or 'Interno')" },
-            "summary": { 
-                "executive": "string", 
-                "decisions": ["string"], 
-                "problems": ["string"],
-                "proposals": ["string"]
-            },
-            "chapters": [ { "title": "string", "startTime": "string (optional)", "summary": "string" } ],
-            "questions": [ { "question": "string", "answer": "string" } ],
-            "tasks": [ 
-                { 
-                    "id": "generate_uuid", 
-                    "description": "string", 
-                    "type": "operational|technical|administrative|follow_up", 
-                    "status": "pending", 
-                    "assignee": "string", 
-                    "dueDate": "YYYY-MM-DD (optional)"
-                } 
-            ],
-            "metrics": { "sentiment": "positive|neutral|negative", "participationScore": number, "qualityScore": number }
-        }
+        Output JSON: { "meta": {...}, "summary": {...}, "chapters": [...], "questions": [...], "tasks": [...], "metrics": {...} }
     `;
 
-    try {
-        let model = config.models.complex;
-        if (!model || model.includes('flash') || model === 'gemini-2.5-flash-latest') {
-            model = 'gemini-3-pro-preview';
-        }
+    return executeWithRetry(async () => {
+        const ai = new GoogleGenAI({ apiKey });
+        let model = config.models.complex || 'gemini-3-pro-preview';
+        if (model === 'gemini-2.5-flash-latest') model = 'gemini-3-pro-preview';
 
         const response = await ai.models.generateContent({
             model: model,
@@ -320,68 +279,24 @@ export const analyzeMeetingTranscript = async (transcript: string, config: ApiCo
 
         const jsonText = response.text || "{}";
         const parsed = JSON.parse(jsonText);
-        
-        return {
-            ...parsed,
-            originalTranscript: transcript
-        };
-
-    } catch (e: any) {
-        console.error("Meeting Analysis Error:", e);
-        const msg = e.message || JSON.stringify(e);
-        if (msg.includes('400')) throw new Error("Error en solicitud a Google Cloud (400). Verifica si el texto es demasiado largo o si la API Key es válida.");
-        throw new Error(`Error analizando reunión: ${msg}`);
-    }
+        return { ...parsed, originalTranscript: transcript };
+    }).catch(e => {
+        handleGeminiError(e, "Meeting Analysis");
+        return {} as any;
+    });
 };
 
 // --- GLOBAL SUMMARY GENERATION ---
-export const generateGlobalSummary = async (
-    transcripts: string[], 
-    config: ApiConfig, 
-    options: SummaryOptions
-): Promise<string> => {
+export const generateGlobalSummary = async (transcripts: string[], config: ApiConfig, options: SummaryOptions): Promise<string> => {
   if (transcripts.length === 0) return "";
   
   if (config.provider === 'gemini') {
     const apiKey = getApiKey(config);
-    const combinedText = transcripts.join("\n\n---\n\n");
-    
-    let role = "Actúa como un Analista de Negocios Senior.";
-    let focusInstruction = "";
-    
-    switch (options.focus) {
-        case 'action_items':
-            role = "Actúa como un Project Manager.";
-            focusInstruction = "Enfócate en Acciones, Tareas y Fechas Límite.";
-            break;
-        case 'decisions':
-            role = "Actúa como un Secretario de la Junta.";
-            focusInstruction = "Enfócate en Decisiones y Acuerdos.";
-            break;
-        case 'sentiment':
-            role = "Actúa como un Psicólogo.";
-            focusInstruction = "Analiza el tono y sentimiento.";
-            break;
-        default: 
-            role = "Actúa como un Analista de Negocios Senior.";
-            focusInstruction = "Provee un Resumen Ejecutivo comprensivo.";
-    }
+    // Batch large summaries to avoid context limit
+    const combinedText = transcripts.join("\n\n---\n\n").substring(0, 800000); 
+    const prompt = `Actúa como Analista. Genera resumen (${options.focus}) en formato ${options.format}. Input: ${combinedText}`;
 
-    const lengthInstruction = options.length === 'detailed' ? "Provee un reporte DETALLADO." : "Sé CONCISO.";
-    const langInstruction = "RESPONDE SIEMPRE EN ESPAÑOL.";
-
-    const prompt = `
-      ${role}
-      ${langInstruction}
-      INPUT DATA:
-      ${combinedText}
-      INSTRUCTIONS:
-      1. ${focusInstruction}
-      2. ${lengthInstruction}
-      3. Output format: ${options.format}
-    `;
-
-    try {
+    return executeWithRetry(async () => {
         const { GoogleGenAI } = await loadGeminiSDK();
         const ai = new GoogleGenAI({ apiKey });
         let model = config.models.complex || 'gemini-3-pro-preview';
@@ -390,61 +305,47 @@ export const generateGlobalSummary = async (
           model: model,
           contents: { parts: [{ text: prompt }] }
         });
-        return response.text || "No se pudo generar el resumen (Respuesta vacía del modelo).";
-    } catch (e: any) {
-        throw new Error("Gemini Error: " + (e.message || "Unknown"));
-    }
+        return response.text || "Respuesta vacía.";
+    }).catch(e => {
+        handleGeminiError(e, "Global Summary");
+        return "";
+    });
   } else {
-     return "OpenAI Summary not implemented in this demo update.";
+     return "OpenAI Summary not available.";
   }
 };
 
 // --- CHAT WITH CONTEXT ---
-export const chatWithProjectContext = async (
-  message: string, 
-  history: ChatMessage[], 
-  files: AudioFile[], 
-  config: ApiConfig
-): Promise<string> => {
+export const chatWithProjectContext = async (message: string, history: ChatMessage[], files: AudioFile[], config: ApiConfig): Promise<string> => {
   if (config.provider === 'gemini') {
       const apiKey = getApiKey(config);
       const validFiles = files.filter(f => f.status === 'completed' && f.transcript);
+      if (validFiles.length === 0) return "No hay información en el contexto.";
 
-      if (validFiles.length === 0) return "No encuentro información sobre eso en los registros.";
+      // Truncate context to safe limits (~100 files might be too big for Flash without careful pruning, but Pro handles 1M tokens)
+      // We will assume 1.5 Pro or Flash 1.5 which has large context.
+      const contextData = validFiles.map((f, i) => `FILE ${i+1} (${f.name}):\n${f.transcript}`).join("\n---\n");
+      const systemInstruction = `Eres Chronos AI. Responde usando este contexto:\n${contextData}`;
+      
+      const contents = [...history.map(msg => ({ role: msg.role === 'model' ? 'model' : 'user', parts: [{ text: msg.text }] })), { role: 'user', parts: [{ text: message }] }];
 
-      const contextData = validFiles.map((f, i) => 
-        `FILE ${i+1} [Type: ${f.fileType || 'unknown'}]: "${f.name}" (${f.date.toLocaleDateString()}):\n${f.transcript}`
-      ).join("\n\n----------------\n\n");
+      return executeWithRetry(async () => {
+          const { GoogleGenAI } = await loadGeminiSDK();
+          const ai = new GoogleGenAI({ apiKey });
+          let model = config.models.complex || 'gemini-3-pro-preview';
 
-      const systemInstruction = `
-        Eres Chronos AI, un asistente de conocimiento experto. Responde basándote ÚNICAMENTE en el contexto proporcionado.
-        CONTEXT:
-        ${contextData}
-      `;
-
-      const pastMessages = history.map(msg => ({
-        role: msg.role === 'model' ? 'model' : 'user',
-        parts: [{ text: msg.text }]
-      }));
-
-      const { GoogleGenAI } = await loadGeminiSDK();
-      const ai = new GoogleGenAI({ apiKey });
-      const contents = [
-          ...pastMessages,
-          { role: 'user', parts: [{ text: message }] }
-      ];
-
-      let model = config.models.complex || 'gemini-3-pro-preview';
-
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: contents,
-        config: { systemInstruction: systemInstruction }
+          const response = await ai.models.generateContent({
+            model: model,
+            contents: contents,
+            config: { systemInstruction: systemInstruction }
+          });
+          return response.text || "No response.";
+      }).catch(e => {
+          handleGeminiError(e, "Chat Context");
+          return "";
       });
-
-      return response.text || "No response.";
   } else {
-      return "OpenAI Chat not supported in this version.";
+      return "OpenAI Chat not supported.";
   }
 };
 
@@ -456,15 +357,15 @@ const transcribeWithOpenAI = async (file: File, apiKey: string, config: ApiConfi
   formData.append("model", "whisper-1"); 
   formData.append("language", "es");
 
-  const transcriptResponse = await fetch(`${baseUrl}/audio/transcriptions`, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${apiKey}` },
-      body: formData
+  return executeWithRetry(async () => {
+      const response = await fetch(`${baseUrl}/audio/transcriptions`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${apiKey}` },
+          body: formData
+      });
+
+      if (!response.ok) throw new Error(`Whisper Error: ${response.status}`);
+      const data = await response.json();
+      return { text: data.text, summary: "Summary not available in legacy mode." };
   });
-
-  if (!transcriptResponse.ok) throw new Error(`Whisper Error: ${transcriptResponse.status}`);
-  const transcriptData = await transcriptResponse.json();
-  const rawText = transcriptData.text;
-
-  return { text: rawText, summary: "Summary not available in legacy mode." };
 };

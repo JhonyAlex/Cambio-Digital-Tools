@@ -165,7 +165,7 @@ const MeetingAnalystTool: React.FC = () => {
                 <div>
                     <h1 className="text-2xl font-bold text-white flex items-center gap-2">
                         <span className="bg-indigo-600 p-1.5 rounded-lg">📊</span>
-                        {t.meetingTitle}
+                        Analista de Reuniones
                     </h1>
                     <p className="text-slate-400 text-sm hidden md:block">{t.meetingDesc}</p>
                 </div>

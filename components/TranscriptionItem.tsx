@@ -96,11 +96,29 @@ const TranscriptionItem: React.FC<Props> = ({ item }) => {
       }
   };
 
-  const handleCopy = (e: React.MouseEvent) => {
+  const handleCopy = async (e: React.MouseEvent) => {
       e.stopPropagation();
       if (item.transcript) {
-          navigator.clipboard.writeText(item.transcript);
-          setHasCopied(true);
+          try {
+              // Try modern API
+              await navigator.clipboard.writeText(item.transcript);
+              setHasCopied(true);
+          } catch (err) {
+              console.warn("Clipboard API failed, fallback...", err);
+              // Fallback for some contexts
+              const textArea = document.createElement("textarea");
+              textArea.value = item.transcript;
+              document.body.appendChild(textArea);
+              textArea.select();
+              try {
+                  document.execCommand('copy');
+                  setHasCopied(true);
+              } catch (err2) {
+                  console.error("Copy fallback failed", err2);
+                  alert("No se pudo copiar automáticamente. Por favor selecciona y copia manualmente.");
+              }
+              document.body.removeChild(textArea);
+          }
           setTimeout(() => setHasCopied(false), 2000);
       }
   };

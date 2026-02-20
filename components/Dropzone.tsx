@@ -34,6 +34,13 @@ const Dropzone: React.FC<DropzoneProps> = ({ onFilesAdded, t }) => {
   };
 
   const processFiles = (files: File[]) => {
+    // Large batch warning
+    if (files.length > 50) {
+        if (!confirm(`⚠️ Estás subiendo ${files.length} archivos.\n\nEsto puede tardar varios minutos y consumir bastantes tokens de IA. ¿Deseas continuar?`)) {
+            return;
+        }
+    }
+
     // Basic filtering to ensure we don't try to process EXEs or binaries unrelated to knowledge
     const validFiles = files.filter(f => {
        const type = f.type;

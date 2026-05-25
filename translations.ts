@@ -88,7 +88,6 @@ export const translations = {
     focusAction: "Tareas y Acciones",
     focusDecisions: "Decisiones Clave",
     focusSentiment: "Análisis de Sentimiento",
-    focusMaintenance: "Reporte de Mantenimiento",
     format: "Formato de Salida",
     formatMd: "Documento Markdown",
     formatBullets: "Lista de Puntos",
@@ -118,10 +117,4 @@ export const translations = {
     // MEETING TOOL
     meetingTitle: "Analista de Reuniones",
     meetingDesc: "Extrae insights, tareas y decisiones de tus transcripciones de reuniones.",
-    // Mantenimiento
-    maintenanceMode: "Modo de Reporte",
-    maintenanceWeekly: "Semanal",
-    maintenanceMonthly: "Mensual",
-    maintenanceNoCSV: "No se encontraron archivos CSV. Subí un archivo de Primavera (Mano de Obra) para generar el reporte.",
-    maintenanceError: "Error al procesar el archivo CSV. Verificá que sea un archivo válido de Primavera (Mano de Obra) con formato de columnas correcto.",
 };

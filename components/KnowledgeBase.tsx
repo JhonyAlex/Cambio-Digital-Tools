@@ -1,11 +1,10 @@
 
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { AudioFile, TimelineGroup, ApiConfig, Project, ChatMessage, Session, SummaryOptions } from '../types';
-import { groupFilesByDate, extractDateFromFilename, extractSequenceFromFilename, convertAudioToWav, readFileAsText } from '../utils';
-import { generateGlobalSummary, processMultimodalContent, chatWithProjectContext, generateMaintenanceReport } from '../services/geminiService';
+import { groupFilesByDate, extractDateFromFilename, extractSequenceFromFilename, convertAudioToWav } from '../utils';
+import { generateGlobalSummary, processMultimodalContent, chatWithProjectContext } from '../services/geminiService';
 import { saveProject } from '../services/storageService';
-import { localBlobService } from '../services/localBlobService';
-import { processMaintenanceCSV } from '../services/maintenanceReportService';
+import { localBlobService } from '../services/localBlobService'; 
 import TranscriptionItem from './TranscriptionItem';
 import Dropzone from './Dropzone';
 import SummaryGeneratorModal from './SummaryGeneratorModal';
@@ -196,22 +195,6 @@ const KnowledgeBase: React.FC<Props> = ({ initialProject, apiConfig, onBack }) =
       
       nextBatch.forEach(async (fileObj) => {
         try {
-          // ── CSV DETECTION: skip Gemini, store raw content ──
-          const isCSV = fileObj.file?.name.toLowerCase().endsWith('.csv');
-          if (isCSV && fileObj.file) {
-            const rawText = await readFileAsText(fileObj.file);
-            setProject(prev => ({
-              ...prev,
-              files: prev.files.map(f => 
-                f.id === fileObj.id 
-                  ? { ...f, status: 'completed', transcript: rawText, summary: 'CSV Primavera — Mano de Obra', file: undefined }
-                  : f
-              )
-            }));
-            processingQueueRef.current = processingQueueRef.current.filter(id => id !== fileObj.id);
-            return;
-          }
-
           // Hydrate file if it's missing (rare, usually happens on reload)
           let fileToProcess = fileObj.file;
           
@@ -279,56 +262,6 @@ const KnowledgeBase: React.FC<Props> = ({ initialProject, apiConfig, onBack }) =
   const handleGenerateSummary = async (selectedFiles: AudioFile[], options: SummaryOptions) => {
     setIsGeneratingSummary(true);
     try {
-      // ── MODO REPORTE DE MANTENIMIENTO ──
-      if (options.focus === 'maintenance_report') {
-        const csvFiles = selectedFiles.filter(f => 
-          f.fileType === 'text' && (f.name.toLowerCase().endsWith('.csv') || f.transcript)
-        );
-        
-        if (csvFiles.length === 0) {
-          alert(t.maintenanceNoCSV);
-          setIsGeneratingSummary(false);
-          return;
-        }
-
-        const csvContent = csvFiles[0].transcript || '';
-        if (!csvContent.trim()) {
-          alert(t.maintenanceNoCSV);
-          setIsGeneratingSummary(false);
-          return;
-        }
-
-        const periodType = options.periodType || 'semanal';
-        const reportData = processMaintenanceCSV(csvContent, periodType);
-        
-        if (!reportData) {
-          alert(t.maintenanceError);
-          setIsGeneratingSummary(false);
-          return;
-        }
-
-        const narrativeReport = await generateMaintenanceReport(
-          reportData.statsSummary,
-          periodType,
-          apiConfig
-        );
-
-        const verifiedHeader = `## 📊 Datos Verificados del Período\n\n` +
-          `Período ${reportData.stats.periodType === 'semanal' ? 'Semanal' : 'Mensual'}: ${reportData.stats.periodLabel}\n\n` +
-          `| Métrica | Valor |\n| :--- | ---: |\n` +
-          `| OTs únicas | **${reportData.stats.uniqueOTs}** |\n` +
-          `| Registros de M.O. | **${reportData.stats.totalRecords}** |\n` +
-          `| Horas totales | **${reportData.stats.totalHoursFormatted}** |\n` +
-          `| Trabajadores | **${reportData.stats.workers.map(w => w.name).join(', ')}** |\n\n` +
-          `---\n\n`;
-        
-        setProject(prev => ({ ...prev, globalSummary: verifiedHeader + narrativeReport }));
-        setShowSummaryModal(false);
-        setIsGeneratingSummary(false);
-        return;
-      }
-
-      // ── MODO NORMAL ──
       const chronologicallySorted = [...selectedFiles].sort((a, b) => a.date.getTime() - b.date.getTime() || a.sequence - b.sequence);
       const texts = chronologicallySorted.map(f => { let txt = f.transcript || ""; if (selectedFiles.length > 50 && txt.length > 1000) { txt = txt.substring(0, 1000) + "... [truncated]"; } return `[${f.date.toLocaleDateString()} - ${f.name}]: ${txt}`; });
       const summary = await generateGlobalSummary(texts, apiConfig, options);

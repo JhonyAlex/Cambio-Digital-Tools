@@ -369,3 +369,104 @@ const transcribeWithOpenAI = async (file: File, apiKey: string, config: ApiConfi
       return { text: data.text, summary: "Summary not available in legacy mode." };
   });
 };
+
+// ── MAINTENANCE REPORT GENERATION ───────────────────────────────
+// Usa estadísticas precalculadas (exactas) y Gemini solo para narrativa.
+
+const MAINTENANCE_REPORT_PROMPT = `
+Eres un Analista Senior de Mantenimiento Industrial. Genera un reporte ejecutivo en Markdown.
+
+REGLAS CRÍTICAS:
+1. USA EXCLUSIVAMENTE los datos de la sección "Estadísticas Verificadas". NO inventes, modifiques ni redondees ningún número.
+2. NO menciones trabajadores que no aparecen en los datos verificados.
+3. Si solo hay un trabajador, indicalo como un riesgo operativo (dependencia de una sola persona).
+4. Las recomendaciones deben ser accionables y basadas en los datos reales.
+
+ESTRUCTURA DEL REPORTE:
+
+## Reporte de Mantenimiento — Mano de Obra
+
+[Encabezado con período, OTs, registros, horas totales — COPIAR DATOS EXACTOS]
+
+------
+
+### Resumen Ejecutivo
+
+[2-3 frases con los hallazgos más importantes. Mencionar el activo más crítico, distribución del tipo de trabajo, y riesgos de carga laboral si aplica.]
+
+------
+
+### Análisis por Activos
+
+[Tabla Markdown con el Top 10 de activos. Columnas: Activo | Horas | OTs | Reg. M.O.]
+
+Después de la tabla, 2-3 frases analizando los activos más demandantes.
+
+------
+
+### Análisis por Tipo de OT
+
+[Tabla con TODOS los tipos. Columnas: Tipo de OT | OTs | Reg. M.O. | Horas Totales | Tiempo Medio]
+
+Análisis breve: ¿predomina preventivo o correctivo? ¿Qué implicaciones tiene?
+
+------
+
+### Análisis por Trabajador
+
+[Tabla con TODOS los trabajadores. Columnas: Trabajador | OTs | Reg. M.O. | Horas Totales]
+
+Análisis de distribución de carga. Si hay un solo trabajador, señalar el riesgo.
+
+------
+
+### Hallazgos Clave
+
+- [3-5 bullets con hallazgos basados en los datos]
+
+------
+
+### Recomendaciones
+
+- [3-5 bullets con acciones recomendadas]
+
+IMPORTANTE: Responde SIEMPRE en español. El reporte debe ser profesional, directo y accionable. No uses emojis en el contenido del reporte.
+`;
+
+export const generateMaintenanceReport = async (
+  statsSummary: string,
+  periodType: "semanal" | "mensual",
+  config: ApiConfig
+): Promise<string> => {
+  if (config.provider !== 'gemini') {
+    return "El reporte de mantenimiento requiere Gemini. Configuralo en Ajustes.";
+  }
+
+  const apiKey = getApiKey(config);
+  const { GoogleGenAI } = await loadGeminiSDK();
+
+  const periodLabel = periodType === "semanal" ? "Semanal" : "Mensual";
+
+  const prompt = `
+${MAINTENANCE_REPORT_PROMPT}
+
+ESTADÍSTICAS VERIFICADAS (USA SOLO ESTOS DATOS):
+${statsSummary}
+
+Período: ${periodLabel}
+`;
+
+  return executeWithRetry(async () => {
+    const ai = new GoogleGenAI({ apiKey });
+    const model = config.models.complex || 'gemini-3-pro-preview';
+
+    const response = await ai.models.generateContent({
+      model: model,
+      contents: { parts: [{ text: prompt }] },
+    });
+    return response.text || "Error generando el reporte.";
+  }).catch(e => {
+    handleGeminiError(e, "Maintenance Report");
+    return "";
+  });
+};

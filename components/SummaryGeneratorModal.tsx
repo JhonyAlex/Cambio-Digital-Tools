@@ -132,7 +132,7 @@ const SummaryGeneratorModal: React.FC<Props> = ({
 
             <div className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar">
                 
-                {/* FOCUS */}
+                 {/* FOCUS */}
                 <div className="space-y-3">
                     <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">{t.focus}</label>
                     <div className="space-y-2">
@@ -141,10 +141,11 @@ const SummaryGeneratorModal: React.FC<Props> = ({
                             { id: 'action_items', label: t.focusAction, icon: '✅' },
                             { id: 'decisions', label: t.focusDecisions, icon: '⚖️' },
                             { id: 'sentiment', label: t.focusSentiment, icon: '❤️' },
+                            { id: 'maintenance_report', label: t.focusMaintenance, icon: '🔧' },
                         ].map(opt => (
                             <button
                                 key={opt.id}
-                                onClick={() => setOptions({...options, focus: opt.id as any})}
+                                onClick={() => setOptions({...options, focus: opt.id as any, periodType: opt.id === 'maintenance_report' ? (options.periodType || 'semanal') : undefined})}
                                 className={`w-full flex items-center gap-3 p-3 rounded-xl border text-left text-sm transition-all ${
                                     options.focus === opt.id 
                                     ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-900/20' 
@@ -157,6 +158,31 @@ const SummaryGeneratorModal: React.FC<Props> = ({
                         ))}
                     </div>
                 </div>
+
+                {/* PERIOD TYPE (solo para mantenimiento) */}
+                {options.focus === 'maintenance_report' && (
+                <div className="space-y-3">
+                    <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">{t.maintenanceMode}</label>
+                    <div className="grid grid-cols-2 gap-2">
+                        {[
+                            { id: 'semanal', label: t.maintenanceWeekly },
+                            { id: 'mensual', label: t.maintenanceMonthly },
+                        ].map(opt => (
+                            <button
+                                key={opt.id}
+                                onClick={() => setOptions({...options, periodType: opt.id as 'semanal' | 'mensual'})}
+                                className={`px-3 py-2 rounded-lg border text-sm font-medium transition-all ${
+                                    options.periodType === opt.id
+                                    ? 'bg-emerald-600 text-white border-emerald-500'
+                                    : 'bg-slate-700/50 border-slate-700 text-slate-300 hover:bg-slate-700'
+                                }`}
+                            >
+                                {opt.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+                )}
 
                 {/* FORMAT & LENGTH */}
                 <div className="grid grid-cols-2 gap-4">

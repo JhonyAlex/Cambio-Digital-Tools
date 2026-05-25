@@ -81,9 +81,11 @@ export interface ApiConfig {
 }
 
 export interface SummaryOptions {
-  focus: 'general' | 'action_items' | 'decisions' | 'sentiment';
+  focus: 'general' | 'action_items' | 'decisions' | 'sentiment' | 'maintenance_report';
   format: 'markdown' | 'bullet_points' | 'email';
   length: 'concise' | 'detailed';
+  /** Solo cuando focus === 'maintenance_report' */
+  periodType?: 'semanal' | 'mensual';
 }
 
 // --- PAYROLL TYPES ---

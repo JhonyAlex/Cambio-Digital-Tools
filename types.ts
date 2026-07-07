@@ -65,7 +65,7 @@ export interface TimelineGroup {
   items: AudioFile[];
 }
 
-export type ApiProvider = 'gemini' | 'openai';
+export type ApiProvider = 'gemini' | 'openai' | 'custom';
 
 // NEW: Granular Model Configuration
 export interface ModelStrategy {
@@ -73,11 +73,22 @@ export interface ModelStrategy {
     complex: string; // e.g., gemini-2.5-pro, gpt-4o
 }
 
+// NEW: Custom AI Provider (OpenAI-compatible APIs like MiMo, OpenRouter, Groq, etc.)
+export interface CustomProvider {
+    id: string;
+    name: string;           // Display name (e.g., "MiMo Pro", "OpenRouter")
+    apiKey: string;         // Dedicated API Key (e.g., sk-xxxx, tp-xxxx)
+    baseUrl: string;        // Dedicated Base URL (e.g., https://api.xiaomimimo.com/v1)
+    models: ModelStrategy;
+    isDefault: boolean;     // Whether this is the currently active provider
+}
+
 export interface ApiConfig {
   provider: ApiProvider;
   apiKey: string;
   baseUrl?: string; // For OpenRouter or custom proxies
   models: ModelStrategy; // Changed from single 'model' string
+  customProviderId?: string; // Active custom provider ID when provider === 'custom'
 }
 
 export interface SummaryOptions {

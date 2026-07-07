@@ -1,14 +1,47 @@
 
 import { fileToGenerativePart, readFileAsText, detectFileType } from '../utils';
-import { ApiConfig, AudioFile, ChatMessage, SummaryOptions, MeetingAnalysis } from '../types';
+import { ApiConfig, AudioFile, ChatMessage, SummaryOptions, MeetingAnalysis, CustomProvider } from '../types';
 import { getEffectiveApiKey } from './config'; 
+
+// --- CUSTOM PROVIDER RESOLUTION ---
+// When provider === 'custom', the apiKey and baseUrl live in the custom provider config,
+// not directly on ApiConfig. These helpers resolve them.
+
+const CUSTOM_PROVIDERS_KEY = 'chronos_custom_providers';
+
+const getSavedCustomProviders = (): CustomProvider[] => {
+    try {
+        const raw = localStorage.getItem(CUSTOM_PROVIDERS_KEY);
+        return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+};
+
+const resolveCustomProvider = (config: ApiConfig): CustomProvider | undefined => {
+    if (!config.customProviderId) return undefined;
+    return getSavedCustomProviders().find(p => p.id === config.customProviderId);
+};
 
 // Helper to get the most reliable key
 const getApiKey = (config: ApiConfig): string => {
+    // For custom providers, resolve from saved providers
+    if (config.provider === 'custom') {
+        const cp = resolveCustomProvider(config);
+        if (cp && cp.apiKey && cp.apiKey.trim().length >= 5) return cp.apiKey.trim();
+    }
+    
     if (config.apiKey && config.apiKey.trim().length >= 10) return config.apiKey.trim();
-    const systemKey = getEffectiveApiKey(config.provider);
+    const systemKey = getEffectiveApiKey(config.provider === 'custom' ? 'openai' : config.provider);
     if (systemKey && systemKey.length >= 10) return systemKey;
-    throw new Error(`Falta la API Key para ${config.provider === 'gemini' ? 'Google Gemini' : 'OpenAI/Compatible'}. Por favor configúrala en Ajustes (⚙️).`);
+    throw new Error(`Falta la API Key para ${config.provider === 'gemini' ? 'Google Gemini' : config.provider === 'custom' ? 'Proveedor Personalizado' : 'OpenAI/Compatible'}. Por favor configúrala en Ajustes (⚙️).`);
+};
+
+// Helper to get the base URL for OpenAI-compatible providers
+const getBaseUrl = (config: ApiConfig): string => {
+    if (config.provider === 'custom') {
+        const cp = resolveCustomProvider(config);
+        if (cp && cp.baseUrl) return cp.baseUrl.replace(/\/+$/, '');
+    }
+    return (config.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
 };
 
 // --- DYNAMIC IMPORT HELPER (SINGLETON PATTERN) ---
@@ -101,10 +134,11 @@ export const testApiConnection = async (config: ApiConfig): Promise<string> => {
       return "Error"; 
     }
   } else {
-    // OpenAI Connection Check
+    // OpenAI / Custom Provider Connection Check
     const apiKey = getApiKey(config);
-    const baseUrl = config.baseUrl || "https://api.openai.com/v1";
+    const baseUrl = getBaseUrl(config);
     const model = config.models.fast || "gpt-4o-mini";
+    const providerLabel = config.provider === 'custom' ? 'Personalizado' : 'OpenAI Compatible';
 
     try {
         const response = await fetch(`${baseUrl}/chat/completions`, {
@@ -125,20 +159,21 @@ export const testApiConnection = async (config: ApiConfig): Promise<string> => {
             throw new Error(`Status ${response.status}: ${errText}`);
         }
         
-        return `OpenAI Compatible OK (${model})`;
+        return `${providerLabel} OK (${model})`;
     } catch (e: any) {
-        throw new Error(`OpenAI Error: ${e.message}`);
+        throw new Error(`${providerLabel} Error: ${e.message}`);
     }
   }
 };
 
 // --- UNIFIED MULTIMODAL PROCESSOR ---
 export const processMultimodalContent = async (file: File, config: ApiConfig): Promise<{ text: string; summary: string }> => {
-  if (config.provider === 'openai') {
+  // Route OpenAI and Custom providers through the OpenAI-compatible path
+  if (config.provider === 'openai' || config.provider === 'custom') {
       const apiKey = getApiKey(config); 
       const type = detectFileType(file);
       if (type === 'audio') return transcribeWithOpenAI(file, apiKey, config);
-      throw new Error("OpenAI only supports Audio in this version.");
+      throw new Error(`${config.provider === 'custom' ? 'Proveedor personalizado' : 'OpenAI'} solo soporta Audio en esta versión.`);
   }
 
   const apiKey = getApiKey(config);
@@ -351,7 +386,7 @@ export const chatWithProjectContext = async (message: string, history: ChatMessa
 
 // --- OPENAI TRANSCRIPTION ---
 const transcribeWithOpenAI = async (file: File, apiKey: string, config: ApiConfig): Promise<{ text: string; summary: string }> => {
-  const baseUrl = config.baseUrl || "https://api.openai.com/v1";
+  const baseUrl = getBaseUrl(config);
   const formData = new FormData();
   formData.append("file", file);
   formData.append("model", "whisper-1"); 

@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { ApiConfig, ApiProvider } from '../types';
+import { ApiConfig, ApiProvider, CustomProvider, ModelStrategy } from '../types';
 import { testApiConnection } from '../services/geminiService';
 import { translations } from '../translations';
 import { FIREBASE_CONFIG } from '../services/config'; // Import config to check key
@@ -9,7 +9,9 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   config: ApiConfig;
+  customProviders: CustomProvider[];
   onSave: (config: ApiConfig) => void;
+  onSaveCustomProviders: (providers: CustomProvider[]) => void;
   t: typeof translations;
 }
 
@@ -28,11 +30,13 @@ const GEMINI_COMPLEX_MODELS = [
 const OPENAI_FAST_DEFAULTS = ['gpt-4o-mini', 'gpt-3.5-turbo'];
 const OPENAI_COMPLEX_DEFAULTS = ['gpt-4o', 'o1-mini', 'o1-preview'];
 
-const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) => {
+const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, customProviders: externalCustomProviders, onSave, onSaveCustomProviders, t }) => {
   const [localConfig, setLocalConfig] = useState<ApiConfig>(config);
+  const [customProviders, setCustomProviders] = useState<CustomProvider[]>(externalCustomProviders);
+  const [editingProvider, setEditingProvider] = useState<Partial<CustomProvider> | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
-  const [activeTab, setActiveTab] = useState<'credentials' | 'models'>('credentials');
+  const [activeTab, setActiveTab] = useState<'credentials' | 'models' | 'providers'>('credentials');
 
   // DETERMINE SYSTEM KEY
   // We check Env vars OR Firebase Config
@@ -48,12 +52,21 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
   // Logic: If the localConfig.apiKey is NOT empty AND it is NOT the system key, it's custom.
   const isUsingCustomKey = !!localConfig.apiKey && localConfig.apiKey !== effectiveSystemKey;
 
+  // Get the active custom provider (if provider === 'custom')
+  const activeCustomProvider = localConfig.provider === 'custom' && localConfig.customProviderId
+      ? customProviders.find(p => p.id === localConfig.customProviderId)
+      : undefined;
+
   // Validation: Can we save?
   const isValid = (() => {
       if (localConfig.provider === 'openai') return !!localConfig.apiKey; // OpenAI always needs key
       if (localConfig.provider === 'gemini') {
           // Valid if: User entered a key OR (User left blank AND System Key exists)
           return !!localConfig.apiKey || hasSystemKey;
+      }
+      if (localConfig.provider === 'custom') {
+          // Valid if: There's an active custom provider with apiKey and baseUrl
+          return !!activeCustomProvider && !!activeCustomProvider.apiKey && !!activeCustomProvider.baseUrl;
       }
       return false;
   })();
@@ -82,26 +95,114 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
       }
 
       setLocalConfig(safeConfig);
+      setCustomProviders(externalCustomProviders);
+      setEditingProvider(null);
       setTestResult(null);
       setActiveTab('credentials');
     }
-  }, [isOpen, config, hasSystemKey, effectiveSystemKey]);
+  }, [isOpen, config, externalCustomProviders, hasSystemKey, effectiveSystemKey]);
 
   if (!isOpen) return null;
 
   const handleProviderChange = (provider: ApiProvider) => {
     const isGemini = provider === 'gemini';
+    const isOpenAi = provider === 'openai';
+    const isCustom = provider === 'custom';
+    
+    // If switching to custom and there are providers, auto-select the default or first one
+    let customId: string | undefined = undefined;
+    if (isCustom && customProviders.length > 0) {
+        const defaultP = customProviders.find(p => p.isDefault);
+        customId = defaultP ? defaultP.id : customProviders[0].id;
+    }
+
     setLocalConfig(prev => ({
       ...prev,
       provider,
-      baseUrl: isGemini ? undefined : 'https://api.openai.com/v1',
+      baseUrl: isOpenAi ? 'https://api.openai.com/v1' : isCustom ? undefined : undefined,
+      customProviderId: customId,
       // Set sensible defaults when switching providers
-      models: {
-          fast: isGemini ? GEMINI_FAST_MODELS[0] : OPENAI_FAST_DEFAULTS[0],
-          complex: isGemini ? GEMINI_COMPLEX_MODELS[0] : OPENAI_COMPLEX_DEFAULTS[0]
-      }
+      models: isCustom && customId
+          ? customProviders.find(p => p.id === customId)?.models || { fast: '', complex: '' }
+          : {
+              fast: isGemini ? GEMINI_FAST_MODELS[0] : OPENAI_FAST_DEFAULTS[0],
+              complex: isGemini ? GEMINI_COMPLEX_MODELS[0] : OPENAI_COMPLEX_DEFAULTS[0]
+          }
     }));
     setTestResult(null);
+  };
+
+  // --- CUSTOM PROVIDER MANAGEMENT ---
+  const handleAddCustomProvider = () => {
+      setEditingProvider({
+          id: `custom_${Date.now()}`,
+          name: '',
+          apiKey: '',
+          baseUrl: '',
+          models: { fast: '', complex: '' },
+          isDefault: customProviders.length === 0
+      });
+  };
+
+  const handleEditCustomProvider = (provider: CustomProvider) => {
+      setEditingProvider({ ...provider });
+  };
+
+  const handleSaveCustomProvider = () => {
+      if (!editingProvider || !editingProvider.name || !editingProvider.apiKey || !editingProvider.baseUrl) return;
+      
+      const provider = editingProvider as CustomProvider;
+      const exists = customProviders.findIndex(p => p.id === provider.id);
+      let updated: CustomProvider[];
+      
+      if (exists >= 0) {
+          updated = [...customProviders];
+          updated[exists] = provider;
+      } else {
+          updated = [...customProviders, provider];
+      }
+      
+      // If this provider is set as default, unset others
+      if (provider.isDefault) {
+          updated = updated.map(p => ({ ...p, isDefault: p.id === provider.id }));
+      }
+      
+      setCustomProviders(updated);
+      setEditingProvider(null);
+      
+      // If this is the active provider, update the local config too
+      if (localConfig.provider === 'custom' && localConfig.customProviderId === provider.id) {
+          setLocalConfig(prev => ({ ...prev, models: provider.models }));
+      }
+  };
+
+  const handleDeleteCustomProvider = (id: string) => {
+      if (!confirm('¿Eliminar este proveedor?')) return;
+      const updated = customProviders.filter(p => p.id !== id);
+      setCustomProviders(updated);
+      
+      // If deleted was active, switch to first available or back to gemini
+      if (localConfig.provider === 'custom' && localConfig.customProviderId === id) {
+          if (updated.length > 0) {
+              setLocalConfig(prev => ({ ...prev, customProviderId: updated[0].id, models: updated[0].models }));
+          } else {
+              handleProviderChange('gemini');
+          }
+      }
+      setEditingProvider(null);
+  };
+
+  const handleSetDefaultCustomProvider = (id: string) => {
+      const updated = customProviders.map(p => ({ ...p, isDefault: p.id === id }));
+      setCustomProviders(updated);
+  };
+
+  const handleSelectCustomProvider = (id: string) => {
+      const provider = customProviders.find(p => p.id === id);
+      if (provider) {
+          setLocalConfig(prev => ({ ...prev, customProviderId: id, models: provider.models }));
+          setTestResult(null);
+      }
   };
 
   const handleTestConnection = async () => {
@@ -112,6 +213,13 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
       const configToTest = { ...localConfig };
       if (configToTest.provider === 'gemini' && !configToTest.apiKey && hasSystemKey) {
           configToTest.apiKey = effectiveSystemKey || '';
+      }
+      
+      // For custom providers, inject the provider's key and baseUrl
+      if (configToTest.provider === 'custom' && activeCustomProvider) {
+          configToTest.apiKey = activeCustomProvider.apiKey;
+          configToTest.baseUrl = activeCustomProvider.baseUrl;
+          configToTest.models = activeCustomProvider.models;
       }
       
       if (!configToTest.apiKey) {
@@ -181,6 +289,12 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
             >
                 2. Estrategia de Modelos
             </button>
+            <button 
+                onClick={() => setActiveTab('providers')}
+                className={`flex-1 py-3 text-sm font-medium transition-colors border-b-2 ${activeTab === 'providers' ? 'border-violet-500 text-white bg-slate-800' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+            >
+                3. Proveedores
+            </button>
         </div>
 
         {/* Content - Scrollable */}
@@ -191,7 +305,7 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
                   {/* Provider Selection */}
                   <div>
                     <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">{t.provider}</label>
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-3 gap-3">
                       <button
                         onClick={() => handleProviderChange('gemini')}
                         className={`flex items-center justify-center gap-2 py-3 px-4 rounded-xl border text-sm font-medium transition-all ${
@@ -212,8 +326,65 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
                       >
                         OpenAI / Compatible
                       </button>
+                      <button
+                        onClick={() => handleProviderChange('custom')}
+                        className={`flex items-center justify-center gap-2 py-3 px-4 rounded-xl border text-sm font-medium transition-all ${
+                          localConfig.provider === 'custom' 
+                            ? 'bg-violet-600/20 border-violet-500 text-violet-300' 
+                            : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-750'
+                        }`}
+                      >
+                        Personalizado
+                      </button>
                     </div>
                   </div>
+
+                  {/* Custom Provider Selector (only when provider === 'custom') */}
+                  {localConfig.provider === 'custom' && (
+                      <div className="space-y-3 animate-in fade-in slide-in-from-top-2">
+                          <label className="block text-xs font-bold text-violet-400 uppercase tracking-wider">
+                              Proveedor Activo
+                          </label>
+                          {customProviders.length === 0 ? (
+                              <div className="bg-slate-800/50 border border-dashed border-slate-600 p-4 rounded-xl text-center">
+                                  <p className="text-slate-400 text-sm mb-2">No hay proveedores personalizados.</p>
+                                  <button 
+                                      onClick={() => { setActiveTab('providers'); handleAddCustomProvider(); }}
+                                      className="text-xs text-violet-400 hover:text-violet-300 underline"
+                                  >
+                                      + Añadir un proveedor en la pestaña "Proveedores"
+                                  </button>
+                              </div>
+                          ) : (
+                              <div className="space-y-2">
+                                  <select 
+                                      className="w-full bg-slate-950 border border-violet-500/40 rounded-lg px-3 py-3 text-white text-sm focus:border-violet-500 outline-none"
+                                      value={localConfig.customProviderId || ''}
+                                      onChange={(e) => handleSelectCustomProvider(e.target.value)}
+                                  >
+                                      {customProviders.map(p => (
+                                          <option key={p.id} value={p.id}>
+                                              {p.name} {p.isDefault ? '⭐' : ''} — {p.baseUrl}
+                                          </option>
+                                      ))}
+                                  </select>
+                                  {activeCustomProvider && (
+                                      <div className="bg-violet-900/20 border border-violet-500/20 p-3 rounded-lg text-xs space-y-1">
+                                          <p className="text-violet-300">
+                                              <span className="font-bold">API Key:</span> {activeCustomProvider.apiKey.substring(0, 8)}...{activeCustomProvider.apiKey.slice(-4)}
+                                          </p>
+                                          <p className="text-violet-300">
+                                              <span className="font-bold">Base URL:</span> {activeCustomProvider.baseUrl}
+                                          </p>
+                                          <p className="text-violet-300">
+                                              <span className="font-bold">Rápido:</span> {activeCustomProvider.models.fast || '—'} | <span className="font-bold">Potente:</span> {activeCustomProvider.models.complex || '—'}
+                                          </p>
+                                      </div>
+                                  )}
+                              </div>
+                          )}
+                      </div>
+                  )}
 
                   <div className={`space-y-4 bg-slate-800/50 p-4 rounded-xl border ${!isValid && localConfig.provider === 'gemini' ? 'border-red-500/50' : 'border-slate-700/50'} relative`}>
                     {/* SYSTEM KEY BADGE */}
@@ -333,6 +504,11 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
                   <div className="bg-blue-900/20 border border-blue-500/20 p-4 rounded-xl">
                       <p className="text-sm text-blue-200 leading-relaxed">
                           Define qué modelos usar para cada tipo de tarea. Esto te permite optimizar costos y velocidad según la necesidad.
+                          {localConfig.provider === 'custom' && activeCustomProvider && (
+                              <span className="block mt-1 text-violet-300">
+                                  Proveedor activo: <strong>{activeCustomProvider.name}</strong>
+                              </span>
+                          )}
                       </p>
                   </div>
 
@@ -358,16 +534,18 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
                                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-3 text-white text-sm focus:border-emerald-500 outline-none"
                                 value={localConfig.models.fast}
                                 onChange={(e) => updateModel('fast', e.target.value)}
-                                placeholder="Ej: gpt-4o-mini"
+                                placeholder={localConfig.provider === 'custom' ? "Ej: mimo-v2.5-pro" : "Ej: gpt-4o-mini"}
                               />
                               {/* Suggestions for OpenAI/Router */}
-                              <div className="flex gap-2 mt-2">
-                                  {OPENAI_FAST_DEFAULTS.map(m => (
-                                      <button key={m} onClick={() => updateModel('fast', m)} className="text-[10px] bg-slate-800 px-2 py-1 rounded text-slate-400 hover:text-white border border-slate-700">
-                                          {m}
-                                      </button>
-                                  ))}
-                              </div>
+                              {localConfig.provider !== 'custom' && (
+                                  <div className="flex gap-2 mt-2">
+                                      {OPENAI_FAST_DEFAULTS.map(m => (
+                                          <button key={m} onClick={() => updateModel('fast', m)} className="text-[10px] bg-slate-800 px-2 py-1 rounded text-slate-400 hover:text-white border border-slate-700">
+                                              {m}
+                                          </button>
+                                      ))}
+                                  </div>
+                              )}
                           </div>
                       )}
                   </div>
@@ -396,18 +574,249 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
                                 className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-3 text-white text-sm focus:border-violet-500 outline-none"
                                 value={localConfig.models.complex}
                                 onChange={(e) => updateModel('complex', e.target.value)}
-                                placeholder="Ej: gpt-4o"
+                                placeholder={localConfig.provider === 'custom' ? "Ej: mimo-v2.5-pro" : "Ej: gpt-4o"}
                               />
-                              <div className="flex gap-2 mt-2">
-                                  {OPENAI_COMPLEX_DEFAULTS.map(m => (
-                                      <button key={m} onClick={() => updateModel('complex', m)} className="text-[10px] bg-slate-800 px-2 py-1 rounded text-slate-400 hover:text-white border border-slate-700">
-                                          {m}
-                                      </button>
-                                  ))}
-                              </div>
+                              {localConfig.provider !== 'custom' && (
+                                  <div className="flex gap-2 mt-2">
+                                      {OPENAI_COMPLEX_DEFAULTS.map(m => (
+                                          <button key={m} onClick={() => updateModel('complex', m)} className="text-[10px] bg-slate-800 px-2 py-1 rounded text-slate-400 hover:text-white border border-slate-700">
+                                              {m}
+                                          </button>
+                                      ))}
+                                  </div>
+                              )}
                           </div>
                       )}
                   </div>
+              </div>
+          )}
+
+          {activeTab === 'providers' && (
+              <div className="space-y-6 animate-in fade-in slide-in-from-right-4">
+                  <div className="bg-violet-900/20 border border-violet-500/20 p-4 rounded-xl">
+                      <p className="text-sm text-violet-200 leading-relaxed">
+                          Gestiona tus proveedores de IA personalizados. Compatible con cualquier API OpenAI-compatible (MiMo, OpenRouter, Groq, Ollama, etc.).
+                      </p>
+                  </div>
+
+                  {/* Provider List */}
+                  <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                          <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                              Proveedores Guardados ({customProviders.length})
+                          </label>
+                          <button 
+                              onClick={handleAddCustomProvider}
+                              className="text-xs bg-violet-600/20 text-violet-300 px-3 py-1.5 rounded-lg border border-violet-500/30 hover:bg-violet-600/30 transition-all font-medium"
+                          >
+                              + Añadir Proveedor
+                          </button>
+                      </div>
+
+                      {customProviders.length === 0 && !editingProvider && (
+                          <div className="bg-slate-800/50 border border-dashed border-slate-600 p-6 rounded-xl text-center">
+                              <p className="text-slate-400 text-sm">No hay proveedores personalizados todavía.</p>
+                              <p className="text-slate-500 text-xs mt-1">Haz clic en "+ Añadir Proveedor" para empezar.</p>
+                          </div>
+                      )}
+
+                      {customProviders.map(p => (
+                          <div key={p.id} className={`bg-slate-800/80 border rounded-xl p-4 transition-all ${p.isDefault ? 'border-violet-500/50 ring-1 ring-violet-500/20' : 'border-slate-700'}`}>
+                              <div className="flex items-start justify-between">
+                                  <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2 mb-1">
+                                          <h4 className="text-sm font-bold text-white truncate">{p.name}</h4>
+                                          {p.isDefault && (
+                                              <span className="text-[10px] bg-violet-600/30 text-violet-300 px-2 py-0.5 rounded-full font-bold">
+                                                  ⭐ ACTIVO
+                                              </span>
+                                          )}
+                                      </div>
+                                      <p className="text-xs text-slate-400 truncate">{p.baseUrl}</p>
+                                      <p className="text-xs text-slate-500 mt-1">
+                                          Key: {p.apiKey.substring(0, 6)}...{p.apiKey.slice(-4)} · 
+                                          Rápido: {p.models.fast || '—'} · 
+                                          Potente: {p.models.complex || '—'}
+                                      </p>
+                                  </div>
+                                  <div className="flex items-center gap-1 ml-3 shrink-0">
+                                      {!p.isDefault && (
+                                          <button 
+                                              onClick={() => handleSetDefaultCustomProvider(p.id)}
+                                              title="Establecer como predeterminado"
+                                              className="text-xs text-slate-400 hover:text-violet-400 p-1.5 rounded-lg hover:bg-slate-700 transition-all"
+                                          >
+                                              ⭐
+                                          </button>
+                                      )}
+                                      <button 
+                                          onClick={() => handleEditCustomProvider(p)}
+                                          title="Editar"
+                                          className="text-xs text-slate-400 hover:text-blue-400 p-1.5 rounded-lg hover:bg-slate-700 transition-all"
+                                      >
+                                          ✏️
+                                      </button>
+                                      <button 
+                                          onClick={() => handleDeleteCustomProvider(p.id)}
+                                          title="Eliminar"
+                                          className="text-xs text-slate-400 hover:text-red-400 p-1.5 rounded-lg hover:bg-slate-700 transition-all"
+                                      >
+                                          🗑️
+                                      </button>
+                                  </div>
+                              </div>
+                          </div>
+                      ))}
+                  </div>
+
+                  {/* Edit / Add Form */}
+                  {editingProvider && (
+                      <div className="bg-slate-800 border border-violet-500/30 rounded-xl p-5 space-y-4 animate-in fade-in slide-in-from-bottom-4">
+                          <h4 className="text-sm font-bold text-violet-300 uppercase tracking-wider">
+                              {customProviders.find(p => p.id === editingProvider.id) ? 'Editar Proveedor' : 'Nuevo Proveedor'}
+                          </h4>
+                          
+                          {/* Name */}
+                          <div>
+                              <label className="block text-xs font-medium text-slate-400 mb-1">Nombre del Proveedor</label>
+                              <input 
+                                  type="text"
+                                  value={editingProvider.name || ''}
+                                  onChange={(e) => setEditingProvider(prev => ({ ...prev, name: e.target.value }))}
+                                  placeholder="Ej: MiMo Pro, OpenRouter, Groq..."
+                                  className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none placeholder-slate-600"
+                              />
+                          </div>
+
+                          {/* Dedicated API Key */}
+                          <div>
+                              <label className="block text-xs font-medium text-slate-400 mb-1">
+                                  🔑 API Key Dedicada
+                              </label>
+                              <input 
+                                  type="password"
+                                  value={editingProvider.apiKey || ''}
+                                  onChange={(e) => setEditingProvider(prev => ({ ...prev, apiKey: e.target.value }))}
+                                  placeholder="sk-xxxx o tp-xxxx"
+                                  className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none placeholder-slate-600"
+                              />
+                              <p className="text-[10px] text-slate-500 mt-1">
+                                  Tu clave privada para este proveedor. Nunca se comparte.
+                              </p>
+                          </div>
+
+                          {/* Dedicated Base URL */}
+                          <div>
+                              <label className="block text-xs font-medium text-slate-400 mb-1">
+                                  🌐 URL Base Dedicada
+                              </label>
+                              <input 
+                                  type="text"
+                                  value={editingProvider.baseUrl || ''}
+                                  onChange={(e) => setEditingProvider(prev => ({ ...prev, baseUrl: e.target.value }))}
+                                  placeholder="https://api.xiaomimimo.com/v1"
+                                  className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-violet-500 focus:ring-1 focus:ring-violet-500 outline-none placeholder-slate-600"
+                              />
+                              <p className="text-[10px] text-slate-500 mt-1">
+                                  Endpoint base de la API (formato OpenAI-compatible).
+                              </p>
+                          </div>
+
+                          {/* Model Strategy */}
+                          <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                  <label className="block text-xs font-medium text-emerald-400 mb-1">🚀 Modelo Rápido</label>
+                                  <input 
+                                      type="text"
+                                      value={editingProvider.models?.fast || ''}
+                                      onChange={(e) => setEditingProvider(prev => ({ 
+                                          ...prev, 
+                                          models: { fast: e.target.value, complex: prev?.models?.complex || '' }
+                                      }))}
+                                      placeholder="Ej: mimo-v2.5-pro"
+                                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-emerald-500 outline-none placeholder-slate-600"
+                                  />
+                              </div>
+                              <div>
+                                  <label className="block text-xs font-medium text-violet-400 mb-1">🧠 Modelo Potente</label>
+                                  <input 
+                                      type="text"
+                                      value={editingProvider.models?.complex || ''}
+                                      onChange={(e) => setEditingProvider(prev => ({ 
+                                          ...prev, 
+                                          models: { fast: prev?.models?.fast || '', complex: e.target.value }
+                                      }))}
+                                      placeholder="Ej: mimo-v2.5-pro"
+                                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm focus:border-violet-500 outline-none placeholder-slate-600"
+                                  />
+                              </div>
+                          </div>
+
+                          {/* Default toggle */}
+                          <label className="flex items-center gap-2 cursor-pointer">
+                              <input 
+                                  type="checkbox"
+                                  checked={editingProvider.isDefault || false}
+                                  onChange={(e) => setEditingProvider(prev => ({ ...prev, isDefault: e.target.checked }))}
+                                  className="w-4 h-4 rounded border-slate-600 bg-slate-900 text-violet-500 focus:ring-violet-500"
+                              />
+                              <span className="text-sm text-slate-300">Establecer como predeterminado</span>
+                          </label>
+
+                          {/* Actions */}
+                          <div className="flex justify-end gap-3 pt-2">
+                              <button 
+                                  onClick={() => setEditingProvider(null)}
+                                  className="px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors"
+                              >
+                                  Cancelar
+                              </button>
+                              <button 
+                                  onClick={handleSaveCustomProvider}
+                                  disabled={!editingProvider.name || !editingProvider.apiKey || !editingProvider.baseUrl}
+                                  className={`px-5 py-2 text-sm font-medium rounded-lg transition-all ${
+                                      editingProvider.name && editingProvider.apiKey && editingProvider.baseUrl
+                                      ? 'bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-900/20'
+                                      : 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                                  }`}
+                              >
+                                  Guardar Proveedor
+                              </button>
+                          </div>
+                      </div>
+                  )}
+
+                  {/* Preset Quick-Add Buttons */}
+                  {!editingProvider && (
+                      <div className="space-y-2">
+                          <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Añadir Rápido:</p>
+                          <div className="flex flex-wrap gap-2">
+                              {[
+                                  { name: 'Xiaomi MiMo', baseUrl: 'https://api.xiaomimimo.com/v1', fast: 'mimo-v2.5-pro', complex: 'mimo-v2.5-pro' },
+                                  { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', fast: 'meta-llama/llama-3.1-8b-instruct', complex: 'anthropic/claude-3.5-sonnet' },
+                                  { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', fast: 'llama-3.1-8b-instant', complex: 'llama-3.1-70b-versatile' },
+                                  { name: 'Ollama (Local)', baseUrl: 'http://localhost:11434/v1', fast: 'llama3.1', complex: 'llama3.1:70b' },
+                              ].map(preset => (
+                                  <button 
+                                      key={preset.name}
+                                      onClick={() => {
+                                          setEditingProvider({
+                                              id: `custom_${Date.now()}`,
+                                              name: preset.name,
+                                              apiKey: '',
+                                              baseUrl: preset.baseUrl,
+                                              models: { fast: preset.fast, complex: preset.complex },
+                                              isDefault: customProviders.length === 0
+                                          });
+                                      }}
+                                      className="text-xs bg-slate-800 text-slate-300 px-3 py-1.5 rounded-lg border border-slate-700 hover:border-violet-500/50 hover:text-violet-300 transition-all"
+                                  >
+                                      + {preset.name}
+                                  </button>
+                              ))}
+                          </div>
+                      </div>
+                  )}
               </div>
           )}
 
@@ -416,7 +825,14 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
         {/* Footer */}
         <div className="bg-slate-800/50 px-6 py-4 flex justify-between items-center border-t border-slate-700 shrink-0">
           <p className="text-xs text-slate-500">
-              {activeTab === 'credentials' ? 'Los datos se guardan localmente.' : `Configurado: ${localConfig.provider}`}
+              {activeTab === 'credentials' 
+                  ? (localConfig.provider === 'custom' && activeCustomProvider 
+                      ? `Proveedor: ${activeCustomProvider.name}` 
+                      : 'Los datos se guardan localmente.')
+                  : activeTab === 'providers'
+                  ? `${customProviders.length} proveedor(es) guardado(s)`
+                  : `Configurado: ${localConfig.provider === 'custom' && activeCustomProvider ? activeCustomProvider.name : localConfig.provider}`
+              }
           </p>
           <div className="flex gap-3">
               <button 
@@ -426,7 +842,10 @@ const SettingsModal: React.FC<Props> = ({ isOpen, onClose, config, onSave, t }) 
                 {t.cancel}
               </button>
               <button 
-                onClick={() => onSave(localConfig)}
+                onClick={() => {
+                    onSaveCustomProviders(customProviders);
+                    onSave(localConfig);
+                }}
                 disabled={!isValid}
                 className={`px-6 py-2 text-white text-sm font-medium rounded-lg shadow-lg transition-all ${
                     isValid 

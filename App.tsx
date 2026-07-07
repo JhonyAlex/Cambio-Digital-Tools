@@ -5,7 +5,7 @@ import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import LandingPage from './components/LandingPage';
 import Login from './components/Login';
-import { ApiConfig } from './types';
+import { ApiConfig, CustomProvider } from './types';
 import { translations } from './translations';
 import { getEffectiveApiKey, validateConnectivity, DB_PROVIDER } from './services/config';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -155,16 +155,25 @@ const PageLoader = () => (
 );
 
 // --- LAYOUT COMPONENT ---
+const CUSTOM_PROVIDERS_KEY = 'chronos_custom_providers';
+
 const AppLayout: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [apiConfig, setApiConfig] = useState<ApiConfig>(DEFAULT_CONFIG);
+  const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
   const { user, loading, authError } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
   useEffect(() => {
+    // Load custom providers
+    try {
+        const raw = localStorage.getItem(CUSTOM_PROVIDERS_KEY);
+        if (raw) setCustomProviders(JSON.parse(raw));
+    } catch (e) {}
+
     const savedConfigStr = localStorage.getItem('chronos_api_config');
     let finalConfig = { ...DEFAULT_CONFIG };
     let userSavedKey = '';
@@ -181,15 +190,50 @@ const AppLayout: React.FC = () => {
         userSavedKey = parsed.apiKey || '';
       } catch (e) {}
     }
-    finalConfig.apiKey = getEffectiveApiKey(finalConfig.provider, userSavedKey);
+    
+    // For custom providers, resolve the active provider's API key
+    if (finalConfig.provider === 'custom' && finalConfig.customProviderId) {
+        try {
+            const providers: CustomProvider[] = JSON.parse(localStorage.getItem(CUSTOM_PROVIDERS_KEY) || '[]');
+            const active = providers.find(p => p.id === finalConfig.customProviderId);
+            if (active) {
+                finalConfig.apiKey = active.apiKey;
+                finalConfig.baseUrl = active.baseUrl;
+                finalConfig.models = active.models;
+            }
+        } catch (e) {}
+    } else {
+        finalConfig.apiKey = getEffectiveApiKey(finalConfig.provider, userSavedKey);
+    }
+    
     setApiConfig(finalConfig);
   }, []);
 
+  const handleSaveCustomProviders = (providers: CustomProvider[]) => {
+      setCustomProviders(providers);
+      localStorage.setItem(CUSTOM_PROVIDERS_KEY, JSON.stringify(providers));
+  };
+
   const handleSaveSettings = (newConfig: ApiConfig) => {
-    const effectiveKey = getEffectiveApiKey(newConfig.provider, newConfig.apiKey);
-    const configToSave = { ...newConfig, apiKey: newConfig.apiKey }; 
-    const configToState = { ...newConfig, apiKey: effectiveKey }; 
-    setApiConfig(configToState);
+    // For custom providers, save the config with customProviderId reference (not the injected key)
+    const configToSave = { ...newConfig };
+    
+    if (newConfig.provider === 'custom' && newConfig.customProviderId) {
+        // Don't persist the injected key/baseUrl directly — they live in the custom provider record
+        configToSave.apiKey = '';
+        configToSave.baseUrl = undefined;
+        // Update state with the resolved values for immediate use
+        const active = customProviders.find(p => p.id === newConfig.customProviderId);
+        if (active) {
+            newConfig.apiKey = active.apiKey;
+            newConfig.baseUrl = active.baseUrl;
+            newConfig.models = active.models;
+        }
+    } else {
+        configToSave.apiKey = newConfig.apiKey;
+    }
+    
+    setApiConfig(newConfig);
     localStorage.setItem('chronos_api_config', JSON.stringify(configToSave));
     setIsSettingsOpen(false);
   };
@@ -211,7 +255,14 @@ const AppLayout: React.FC = () => {
       );
   }
 
-  const isConfigured = apiConfig.provider === 'gemini' ? !!(apiConfig.apiKey && apiConfig.apiKey.length >= 10) : !!(apiConfig.apiKey && apiConfig.apiKey.length > 0);
+  const isConfigured = (() => {
+      if (apiConfig.provider === 'gemini') return !!(apiConfig.apiKey && apiConfig.apiKey.length >= 10);
+      if (apiConfig.provider === 'custom') {
+          const cp = customProviders.find(p => p.id === apiConfig.customProviderId);
+          return !!(cp && cp.apiKey && cp.apiKey.length >= 5 && cp.baseUrl);
+      }
+      return !!(apiConfig.apiKey && apiConfig.apiKey.length > 0);
+  })();
   const t = translations;
 
   return (
@@ -232,7 +283,7 @@ const AppLayout: React.FC = () => {
       </main>
 
       <Suspense fallback={null}>
-          <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} config={apiConfig} onSave={handleSaveSettings} t={t} />
+          <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} config={apiConfig} customProviders={customProviders} onSave={handleSaveSettings} onSaveCustomProviders={handleSaveCustomProviders} t={t} />
           {isAdminPanelOpen && <AdminPanel onClose={() => setIsAdminPanelOpen(false)} />}
           <UserProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} />
       </Suspense>

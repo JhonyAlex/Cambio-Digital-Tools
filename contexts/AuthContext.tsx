@@ -1,7 +1,23 @@
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useState } from 'react';
 import { UserProfile } from '../types';
-import { authService } from '../services/authService';
+
+export const DEFAULT_USER: UserProfile = {
+    uid: 'admin_master',
+    email: 'admin@cambiodigital.com',
+    displayName: 'Administrador',
+    role: 'admin',
+    permissions: {
+        canAccessChronos: true,
+        canAccessPayroll: true,
+        canAccessRevenue: true,
+        canAccessWallet: true,
+        canAccessBudgets: true,
+        canAccessPolisher: true,
+        canAccessMeetings: true
+    },
+    createdAt: Date.now()
+};
 
 interface AuthContextType {
     user: UserProfile | null;
@@ -11,8 +27,8 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType>({
-    user: null,
-    loading: true,
+    user: DEFAULT_USER,
+    loading: false,
     refreshUser: async () => {},
     authError: null
 });
@@ -20,67 +36,13 @@ const AuthContext = createContext<AuthContextType>({
 export const useAuth = () => useContext(AuthContext);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const [user, setUser] = useState<UserProfile | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [authError, setAuthError] = useState<string | null>(null);
+    const [user, setUser] = useState<UserProfile | null>(DEFAULT_USER);
+    const [loading] = useState(false);
+    const [authError] = useState<string | null>(null);
 
     const refreshUser = async () => {
-        if (user?.uid) {
-            try {
-                const updatedProfile = await authService.getUserProfile(user.uid);
-                setUser(updatedProfile);
-            } catch (e: any) {
-                console.error("Failed to refresh user", e);
-            }
-        }
+        setUser(DEFAULT_USER);
     };
-
-    useEffect(() => {
-        let unsubscribe: any;
-
-        const initAuth = async () => {
-            try {
-                unsubscribe = await authService.subscribeToAuth(async (firebaseUser) => {
-                    if (firebaseUser) {
-                        try {
-                            // 1. Try to get existing profile
-                            let profile = await authService.getUserProfile(firebaseUser.uid);
-                            
-                            // 2. If null (missing doc), attempt self-healing
-                            if (!profile) {
-                                console.warn("User profile missing in DB. Attempting to repair...");
-                                profile = await authService.createProfileIfMissing(firebaseUser);
-                            }
-                            
-                            setUser(profile);
-                            setAuthError(null);
-                        } catch (e: any) {
-                            console.error("Auth Profile Error:", e);
-                            if (e.message === 'FIREBASE_PERMISSION_DENIED') {
-                                setAuthError('permission-denied');
-                            } else {
-                                // For other errors, we might still want to show an error or just fail
-                                setAuthError(e.message || 'Unknown Auth Error');
-                            }
-                        }
-                    } else {
-                        setUser(null);
-                        setAuthError(null);
-                    }
-                    setLoading(false);
-                });
-            } catch (e) {
-                console.error("Auth init failed", e);
-                setLoading(false);
-            }
-        };
-
-        initAuth();
-
-        return () => {
-            if (unsubscribe && typeof unsubscribe === 'function') unsubscribe();
-        };
-    }, []);
 
     return (
         <AuthContext.Provider value={{ user, loading, refreshUser, authError }}>
@@ -88,3 +50,4 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         </AuthContext.Provider>
     );
 };
+

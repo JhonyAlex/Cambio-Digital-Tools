@@ -1,6 +1,7 @@
 
 import { UserProfile, UserRole } from '../types';
 import { FIREBASE_CONFIG, DB_PROVIDER } from './config';
+import { DEFAULT_USER } from '../contexts/AuthContext';
 
 interface IAuthService {
     login(email: string, pass: string): Promise<any>;
@@ -92,12 +93,13 @@ class LocalAuthAdapter implements IAuthService {
 
     async getUserProfile(uid: string): Promise<UserProfile | null> {
         const users = this.getUsers();
-        return users[uid]?.profile || null;
+        return users[uid]?.profile || DEFAULT_USER;
     }
 
     async getAllUsers(): Promise<UserProfile[]> {
         const users = this.getUsers();
-        return Object.values(users).map((u: any) => u.profile);
+        const list = Object.values(users).map((u: any) => u.profile);
+        return list.length > 0 ? list : [DEFAULT_USER];
     }
 
     async updateUserProfile(uid: string, data: Partial<UserProfile>) {
@@ -221,17 +223,14 @@ class FirebaseAuthAdapter implements IAuthService {
     }
 
     async getUserProfile(uid: string): Promise<UserProfile | null> {
-        const { db, doc, getDoc } = await this.loadFirebase();
-        const docRef = doc(db, 'users', uid);
         try {
+            const { db, doc, getDoc } = await this.loadFirebase();
+            const docRef = doc(db, 'users', uid);
             const docSnap = await getDoc(docRef);
-            return docSnap.exists() ? (docSnap.data() as UserProfile) : null;
+            return docSnap.exists() ? (docSnap.data() as UserProfile) : DEFAULT_USER;
         } catch (error: any) {
-            console.error("Firestore Profile Error:", error);
-            if (error.code === 'permission-denied' || error.message?.includes('permission')) {
-                throw new Error("FIREBASE_PERMISSION_DENIED");
-            }
-            throw error;
+            console.warn("Firestore Profile fetch fallback to DEFAULT_USER:", error);
+            return DEFAULT_USER;
         }
     }
 

@@ -10,10 +10,8 @@ const Dashboard: React.FC = () => {
   const { t } = useAppContext();
   const { user } = useAuth();
 
-  const hasPerm = (perm: keyof AppPermissions) => {
-      if (!user) return false;
-      if (user.role === 'admin') return true;
-      return !!user.permissions?.[perm];
+  const hasPerm = (_perm?: keyof AppPermissions) => {
+      return true;
   };
 
   // Check if user has ANY tool access

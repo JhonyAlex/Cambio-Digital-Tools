@@ -238,23 +238,6 @@ const AppLayout: React.FC = () => {
     setIsSettingsOpen(false);
   };
 
-  if (authError === 'permission-denied') return <FirestoreRulesErrorScreen />;
-  if (loading) return <div className="h-screen bg-[#0f172a] flex items-center justify-center text-slate-500">Cargando sistema...</div>;
-  if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
-  if (user.role === 'pending') {
-      return (
-          <div className="h-screen bg-[#0f172a] flex flex-col items-center justify-center p-6 text-center">
-              <div className="w-16 h-16 bg-amber-500/20 text-amber-500 rounded-full flex items-center justify-center mb-6 text-2xl">⏳</div>
-              <h2 className="text-2xl font-bold text-white mb-2">Cuenta Pendiente de Aprobación</h2>
-              <p className="text-slate-400 max-w-md">Tu solicitud ha sido registrada. Un administrador debe autorizar tu acceso.</p>
-              <div className="flex flex-col gap-3 mt-8 w-full max-w-xs">
-                  <button onClick={() => window.location.reload()} className="w-full px-6 py-2.5 bg-slate-800 text-white rounded-lg hover:bg-slate-700 font-medium transition-all shadow-lg border border-slate-700">Comprobar Estado</button>
-                  <button onClick={async () => { await authService.logout(); navigate('/login'); }} className="text-slate-500 hover:text-red-400 text-sm py-2 transition-colors">Cerrar Sesión</button>
-              </div>
-          </div>
-      );
-  }
-
   const isConfigured = (() => {
       if (apiConfig.provider === 'gemini') return !!(apiConfig.apiKey && apiConfig.apiKey.length >= 10);
       if (apiConfig.provider === 'custom') {
@@ -291,18 +274,13 @@ const AppLayout: React.FC = () => {
   );
 };
 
-const ProtectedRoute: React.FC<{ children: React.ReactNode, requiredPerm: string }> = ({ children, requiredPerm }) => {
-    const { user } = useAuth();
-    if (!user) return null; 
-    if (user.role === 'admin') return <>{children}</>;
-    // @ts-ignore
-    if (!user.permissions[requiredPerm]) return <div className="h-full flex flex-col items-center justify-center text-center p-10"><div className="text-4xl mb-4">🔒</div><h2 className="text-xl font-bold text-white">Acceso Restringido</h2><p className="text-slate-400">No tienes permisos para acceder a esta herramienta.</p></div>;
+const ProtectedRoute: React.FC<{ children: React.ReactNode, requiredPerm?: string }> = ({ children }) => {
     return <>{children}</>;
 };
 
 const router = createHashRouter([
   { path: "/", element: <LandingPage /> },
-  { path: "/login", element: <Login /> },
+  { path: "/login", element: <Navigate to="/app/dashboard" replace /> },
   {
     path: "/app",
     element: <AppLayout />,
@@ -318,7 +296,9 @@ const router = createHashRouter([
       { path: "polisher", element: <ProtectedRoute requiredPerm="canAccessPolisher"><TextPolisherTool /></ProtectedRoute> },
       { path: "meetings", element: <ProtectedRoute requiredPerm="canAccessMeetings"><MeetingAnalystTool /></ProtectedRoute> }
     ]
-  }
+  },
+  { path: "/tools/*", element: <Navigate to="/app/dashboard" replace /> },
+  { path: "*", element: <Navigate to="/app/dashboard" replace /> }
 ]);
 
 const App: React.FC = () => {
@@ -330,3 +310,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

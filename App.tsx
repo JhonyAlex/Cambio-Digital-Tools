@@ -19,6 +19,7 @@ const WalletTool = React.lazy(() => import('./components/tools/WalletTool'));
 const BudgetTool = React.lazy(() => import('./components/tools/BudgetTool'));
 const TextPolisherTool = React.lazy(() => import('./components/tools/TextPolisherTool'));
 const MeetingAnalystTool = React.lazy(() => import('./components/tools/MeetingAnalystTool'));
+const MaintenanceReportTool = React.lazy(() => import('./components/tools/MaintenanceReportTool'));
 
 // --- LAZY LOAD MODALS (New for Stability) ---
 const SettingsModal = React.lazy(() => import('./components/SettingsModal'));
@@ -294,9 +295,13 @@ const router = createHashRouter([
       { path: "wallet", element: <ProtectedRoute requiredPerm="canAccessWallet"><WalletTool /></ProtectedRoute> },
       { path: "budgets", element: <ProtectedRoute requiredPerm="canAccessBudgets"><BudgetTool /></ProtectedRoute> },
       { path: "polisher", element: <ProtectedRoute requiredPerm="canAccessPolisher"><TextPolisherTool /></ProtectedRoute> },
-      { path: "meetings", element: <ProtectedRoute requiredPerm="canAccessMeetings"><MeetingAnalystTool /></ProtectedRoute> }
+      { path: "meetings", element: <ProtectedRoute requiredPerm="canAccessMeetings"><MeetingAnalystTool /></ProtectedRoute> },
+      { path: "maintenance-report-sem-mes", element: <ProtectedRoute requiredPerm="canAccessChronos"><MaintenanceReportTool /></ProtectedRoute> },
+      { path: "maintenance", element: <Navigate to="/app/maintenance-report-sem-mes" replace /> }
     ]
   },
+  { path: "/tools/maintenance-report-sem-mes", element: <Navigate to="/app/maintenance-report-sem-mes" replace /> },
+  { path: "/tools/maintenance", element: <Navigate to="/app/maintenance-report-sem-mes" replace /> },
   { path: "/tools/*", element: <Navigate to="/app/dashboard" replace /> },
   { path: "*", element: <Navigate to="/app/dashboard" replace /> }
 ]);

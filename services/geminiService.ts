@@ -404,3 +404,116 @@ const transcribeWithOpenAI = async (file: File, apiKey: string, config: ApiConfi
       return { text: data.text, summary: "Summary not available in legacy mode." };
   });
 };
+
+// ── MAINTENANCE REPORT GENERATION ───────────────────────────────
+// Genera un informe ejecutivo industrial utilizando estadísticas verificadas y precalculadas.
+
+const MAINTENANCE_REPORT_SYSTEM_PROMPT = `
+Eres un Ingeniero y Analista Senior de Mantenimiento Industrial y Gestión de Activos. Tu labor es redactar un informe ejecutivo riguroso, profesional y de alto valor estratégico en formato Markdown.
+
+REGLAS CRÍTICAS DE REDACCIÓN:
+1. PRECISIÓN TOTAL: Utiliza EXCLUSIVAMENTE las cifras, horas, conteos de OTs y porcentajes suministrados en "Estadísticas Verificadas". NUNCA inventes números, no redondees arbitrariamente ni alteres ningún dato factual.
+2. INTEGRIDAD DEL EQUIPO: No menciones técnicos o trabajadores inexistentes en las estadísticas. Si solo hay un trabajador o la carga está muy concentrada, resáltalo explícitamente como vulnerabilidad o riesgo operativo.
+3. ENFOQUE ACCIONABLE: Las observaciones y recomendaciones deben ser prácticas para la gerencia de planta y el equipo de mantenimiento.
+4. IDIOMA Y ESTILO: Redacta en español formal y profesional. Estructura con encabezados claros, tablas Markdown bien alineadas y listas viñetadas. No utilices emojis dentro de los párrafos ni en las tablas (mantén un tono corporativo).
+
+ESTRUCTURA DEL REPORTE:
+# Informe Ejecutivo de Mantenimiento y Mano de Obra
+
+## 1. Resumen Ejecutivo
+- Síntesis de 2 a 3 párrafos resumiendo el desempeño del período, volumen de horas invertidas, balance entre mantenimiento preventivo vs. correctivo y la principal conclusión operativa.
+
+## 2. Indicadores Clave de Desempeño (KPIs)
+- Tabla comparativa con: Período, Total Horas Hombre, Total OTs Ejecutadas, Registros de M.O., Ratio Preventivo vs Correctivo.
+
+## 3. Análisis de Distribución por Activos y Equipos Críticos
+- Tabla de activos más demandantes (Top Activos por horas y número de intervenciones).
+- Diagnóstico técnico de los equipos con mayor consumo de recursos y posibles causas.
+
+## 4. Distribución por Tipos de Mantenimiento
+- Análisis de la relación Preventivo / Correctivo / Otros.
+- Evaluación de criticidad: ¿la planta está operando en modo reactivo o proactivo?
+
+## 5. Carga de Trabajo y Desempeño del Equipo Técnico
+- Tabla de distribución de horas y OTs por trabajador.
+- Evaluación del balance de carga y análisis de riesgos por dependencia de personal clave.
+
+## 6. Hallazgos Principales y Alertas Operativas
+- Lista estructurada con los 3 a 5 hallazgos más relevantes.
+
+## 7. Plan de Acción y Recomendaciones Estratégicas
+- Recomendaciones priorizadas (Corto y Mediano Plazo) para optimizar la disponibilidad, confiabilidad y eficiencia del equipo.
+`;
+
+export const generateMaintenanceReport = async (
+  statsSummary: string,
+  periodType: 'semanal' | 'mensual' | 'custom',
+  config: ApiConfig,
+  customInstructions?: string
+): Promise<string> => {
+  const apiKey = getApiKey(config);
+  const periodLabel = periodType === "semanal" ? "Semanal" : periodType === "mensual" ? "Mensual" : "Personalizado";
+
+  const userPrompt = `
+ESTADÍSTICAS VERIFICADAS DE LA PLANTA (DATOS REALES EXACTOS):
+${statsSummary}
+
+Período Evaluado: ${periodLabel}
+${customInstructions ? `\nINSTRUCCIONES Y FOCO ESPECÍFICO DEL CLIENTE:\n${customInstructions}` : ''}
+
+Por favor, genera el informe ejecutivo completo siguiendo la estructura definida.
+`;
+
+  if (config.provider === 'gemini') {
+    const { GoogleGenAI } = await loadGeminiSDK();
+    return executeWithRetry(async () => {
+      const ai = new GoogleGenAI({ apiKey });
+      const model = config.models.complex || 'gemini-3-pro-preview';
+
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: { parts: [{ text: userPrompt }] },
+        config: {
+          systemInstruction: MAINTENANCE_REPORT_SYSTEM_PROMPT
+        }
+      });
+      return response.text || "Error generando el informe de mantenimiento.";
+    }).catch(e => {
+      handleGeminiError(e, "Maintenance Report");
+      return "Hubo un error al generar el informe con Gemini. Por favor verifica tu API Key o conexión.";
+    });
+  } else {
+    // Proveedor OpenAI / Custom
+    const baseUrl = getBaseUrl(config);
+    const model = config.models.complex || 'gpt-4o';
+
+    return executeWithRetry(async () => {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: model,
+          messages: [
+            { role: "system", content: MAINTENANCE_REPORT_SYSTEM_PROMPT },
+            { role: "user", content: userPrompt }
+          ],
+          temperature: 0.3
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`AI Provider HTTP error ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data.choices?.[0]?.message?.content || "Error generando el informe.";
+    }).catch(e => {
+      console.error("Custom AI Maintenance Report Error:", e);
+      return `Error conectando con el proveedor de IA (${e.message}). Revisa la configuración.`;
+    });
+  }
+};
+

@@ -19,6 +19,18 @@ export interface ToolDef {
 
 export const TOOLS: ToolDef[] = [
     {
+        id: 'maintenance-report-sem-mes',
+        label: 'Reporte de Mantenimiento Sem/Mes',
+        shortLabel: 'Mantenimiento',
+        path: '/app/maintenance-report-sem-mes',
+        perm: 'canAccessChronos',
+        description: 'Análisis de mano de obra, OTs, preventivo vs correctivo e informes ejecutivos desde Excel y CSV.',
+        color: 'teal',
+        group: 'productivity',
+        letter: 'RM',
+        iconPath: <path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233l2.809-2.808a3.75 3.75 0 00-5.303-5.303l-2.809 2.808m5.303 5.303l-1.922 1.922" />
+    },
+    {
         id: 'chronos',
         label: 'Chronos Audio AI',
         shortLabel: 'Audio & Voz',

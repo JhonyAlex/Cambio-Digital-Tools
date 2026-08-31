@@ -302,6 +302,7 @@ export interface AppPermissions {
     canAccessBudgets: boolean; // New Permission
     canAccessPolisher: boolean; // NEW: Tool available to everyone
     canAccessMeetings: boolean; // NEW: Meeting Analyst
+    canAccessMaintenance?: boolean; // NEW: Maintenance Report Tool
 }
 
 export interface UserProfile {
@@ -369,8 +370,123 @@ export interface MeetingAnalysis {
     createdAt: number;
 }
 
+// --- MAINTENANCE REPORT TYPES (NEW) ---
+
+export type MaintenanceFieldKey = 
+  | 'ot'
+  | 'trabajador'
+  | 'fechaInicio'
+  | 'fechaFin'
+  | 'tipoOT'
+  | 'activo'
+  | 'descripcionActivo'
+  | 'tiempoTotal'
+  | 'observaciones'
+  | 'tarea'
+  | 'descripcionTareas'
+  | 'planMantenimiento'
+  | 'idInforme';
+
+export interface MaintenanceFieldDefinition {
+  key: MaintenanceFieldKey;
+  label: string;
+  required: boolean;
+  description: string;
+  synonyms: string[];
+}
+
+export type MaintenanceColumnMapping = Partial<Record<MaintenanceFieldKey, string>>;
+
+export interface ColumnMappingPreference {
+  id?: string;
+  name?: string;
+  mapping: MaintenanceColumnMapping;
+  updatedAt: number;
+}
+
+export interface MaintenanceRow {
+  idInforme: string;
+  fechaInicio: Date;
+  fechaFin?: Date;
+  ot: string;
+  tipoOT: string;
+  activo: string;
+  descripcionActivo: string;
+  trabajador: string;
+  tiempoTotal: string;
+  tiempoMinutos: number;
+  tiempoHoras: number;
+  observaciones: string;
+  tarea: string;
+  descripcionTareas: string;
+  planMantenimiento: string;
+  rawRowData?: Record<string, any>;
+}
+
+export interface WorkerStat {
+  name: string;
+  ots: number;
+  records: number;
+  hours: number;
+  hoursFormatted: string;
+  percentOfTotal: number;
+}
+
+export interface TypeStat {
+  name: string;
+  ots: number;
+  records: number;
+  hours: number;
+  hoursFormatted: string;
+  avgMinutes: number;
+  avgFormatted: string;
+  percentOfTotal: number;
+}
+
+export interface AssetStat {
+  name: string;
+  hours: number;
+  hoursFormatted: string;
+  ots: number;
+  records: number;
+  percentOfTotal: number;
+}
+
+export interface MaintenanceStats {
+  periodLabel: string;
+  periodType: 'semanal' | 'mensual' | 'custom';
+  periodStart: string;
+  periodEnd: string;
+  totalRecords: number;
+  uniqueOTs: number;
+  totalHours: number;
+  totalHoursFormatted: string;
+  workers: WorkerStat[];
+  byType: TypeStat[];
+  byAsset: AssetStat[];
+  preventiveHours: number;
+  correctiveHours: number;
+  otherHours: number;
+  preventiveRatio: number; // percentage
+  correctiveRatio: number; // percentage
+  topRisks: string[];
+}
+
+export interface MaintenanceReportRecord {
+  id: string;
+  userId?: string;
+  fileName: string;
+  periodType: 'semanal' | 'mensual' | 'custom';
+  periodLabel: string;
+  stats: MaintenanceStats;
+  narrativeReport: string;
+  createdAt: number;
+  customNotes?: string;
+}
+
 // --- CONTEXT TYPE (Moved from App.tsx to avoid circular dependency) ---
 export interface AppContextType {
   apiConfig: ApiConfig;
   t: any; // Using 'any' to avoid circular dependency with translations.ts
 }
+
